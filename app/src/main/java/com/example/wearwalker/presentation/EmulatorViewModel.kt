@@ -231,7 +231,7 @@ class EmulatorViewModel(
                 DeviceScreen.Home -> interactionState
                 DeviceScreen.Menu ->
                     interactionState.copy(
-                        menuIndex = wrapIndex(interactionState.menuIndex - 1, DeviceMenuItem.entries.size),
+                        menuIndex = wrapCircularIndex(interactionState.menuIndex - 1, DeviceMenuItem.entries.size),
                         menuIdleTicksRemaining = randomMenuIdleTicks(),
                     )
                 DeviceScreen.Radar ->
@@ -328,7 +328,7 @@ class EmulatorViewModel(
                 DeviceScreen.Home -> interactionState
                 DeviceScreen.Menu ->
                     interactionState.copy(
-                        menuIndex = wrapIndex(interactionState.menuIndex + 1, DeviceMenuItem.entries.size),
+                        menuIndex = wrapCircularIndex(interactionState.menuIndex + 1, DeviceMenuItem.entries.size),
                         menuIdleTicksRemaining = randomMenuIdleTicks(),
                     )
                 DeviceScreen.Radar ->
@@ -511,7 +511,7 @@ class EmulatorViewModel(
                 }
 
                 val currentEngine = engine ?: return
-                if (!hasWalkingPokemon(currentEngine.exportEeprom())) {
+                if (!hasWalkingPokemonInEeprom(currentEngine.exportEeprom())) {
                     refreshState("No Pokemon held. Use Connect to send one first.")
                     return
                 }
@@ -559,7 +559,7 @@ class EmulatorViewModel(
                 }
 
                 val currentEngine = engine ?: return
-                if (!hasWalkingPokemon(currentEngine.exportEeprom())) {
+                if (!hasWalkingPokemonInEeprom(currentEngine.exportEeprom())) {
                     refreshState("No Pokemon held. Use Connect to send one first.")
                     return
                 }
@@ -720,74 +720,27 @@ class EmulatorViewModel(
     }
 
     private fun handleRadarScanEnter() {
-        val signalCursor = interactionState.radarSignalCursor
-        val graceCursor = interactionState.radarResolvedCursor
-        if (signalCursor == null) {
-            if (interactionState.radarOutcome == false) {
-                resetRadarToHome("It got away. Returning Home.", outcome = false)
-            } else {
-                resetRadarToHome("Signal already faded. Radar ended.", outcome = false)
+        when (
+            val resolution =
+                resolveRadarScanEnter(
+                    state = interactionState,
+                    chainMax = RADAR_CHAIN_MAX,
+                    radarMaxHp = RADAR_MAX_HP,
+                    textAppeared = RADAR_TEXT_APPEARED,
+                    rollSignal = ::rollRadarSignal,
+                    randomSignalCursor = ::randomRadarSignalCursor,
+                    randomSignalWindowTicks = ::randomRadarSignalWindowTicks,
+                )
+        ) {
+            is RadarScanEnterResolution.ResetToHome -> {
+                resetRadarToHome(resolution.statusMessage, outcome = resolution.outcome)
             }
-            return
+
+            is RadarScanEnterResolution.UpdateState -> {
+                interactionState = resolution.state
+                refreshState(resolution.statusMessage)
+            }
         }
-
-        val chosenCursor = interactionState.radarCursor
-        val matched = chosenCursor == signalCursor || chosenCursor == graceCursor
-        if (!matched) {
-            interactionState =
-                interactionState.copy(
-                    radarOutcome = false,
-                    radarResolvedCursor = signalCursor,
-                    radarSignalCursor = null,
-                    radarSignalTicksRemaining = 0,
-                )
-            refreshState("It got away. Press ENTER to return Home.")
-            return
-        }
-
-        val chainTarget = interactionState.radarChainTarget.coerceIn(1, RADAR_CHAIN_MAX)
-        val nextChainProgress = interactionState.radarChainProgress + 1
-        if (nextChainProgress < chainTarget) {
-            val nextSignal = rollRadarSignal()
-            interactionState =
-                interactionState.copy(
-                    radarChainProgress = nextChainProgress,
-                    radarOutcome = true,
-                    radarResolvedCursor = chosenCursor,
-                    radarSignalCursor = randomNextRadarSignalCursor(chosenCursor),
-                    radarSignalTicksRemaining = randomRadarSignalWindowTicks(),
-                    radarSignalLevel = nextSignal.signalLevel,
-                    radarSignalRouteSlot = nextSignal.routeSlot,
-                )
-            refreshState("Rustling grass... keep tracking ($nextChainProgress/$chainTarget).")
-            return
-        }
-
-        val routeSlot = interactionState.radarSignalRouteSlot.coerceIn(0, DeviceOffsets.POKEMON_SLOT_COUNT - 1)
-        interactionState =
-            interactionState.copy(
-                radarMode = RadarMode.BattleMessage,
-                radarBattleAction = RadarBattleAction.Attack,
-                radarBattleAnimation = RadarBattleAnimation.None,
-                radarBattleEnemyResponded = false,
-                radarBattleMessageUsesEnemyName = false,
-                radarBattlePendingEnemyCounterAttack = false,
-                radarBattlePendingCriticalMessage = false,
-                radarBattleAnimTicksRemaining = 0,
-                radarBattlePokemonSlot = routeSlot,
-                radarBattleMessageOffset = RADAR_TEXT_APPEARED,
-                radarBattleReturnToMenu = false,
-                radarPendingCatchSuccess = null,
-                radarChainProgress = nextChainProgress,
-                radarPlayerHp = RADAR_MAX_HP,
-                radarEnemyHp = RADAR_MAX_HP,
-                radarOutcome = true,
-                radarSignalCursor = null,
-                radarResolvedCursor = signalCursor,
-                radarSignalTicksRemaining = 0,
-            )
-
-        refreshState("Radar lock confirmed. Battle started.")
     }
 
     private fun handleRadarBattleMenuEnter() {
@@ -806,116 +759,65 @@ class EmulatorViewModel(
 
         when (interactionState.radarBattleAction) {
             RadarBattleAction.Attack -> {
-                val enemyEvades = Random.nextInt(100) < RADAR_ATTACK_ENEMY_EVADE_CHANCE
-                if (enemyEvades) {
-                    messageOffset = RADAR_TEXT_ATTACKED
-                    battleAnimation = RadarBattleAnimation.AttackEnemyEvade
-                    enemyResponded = true
-                    pendingEnemyCounterAttack = true
-                    pendingCriticalMessage = false
-                    messageUsesEnemyName = false
-                    persistMessage = "Attack missed. Wild Pokemon evaded and is counterattacking."
+                val turn =
+                    resolveRadarAttackTurn(
+                        state = interactionState,
+                        radarMaxHp = RADAR_MAX_HP,
+                        enemyEvadeChancePercent = RADAR_ATTACK_ENEMY_EVADE_CHANCE,
+                        criticalChancePercent = RADAR_ATTACK_CRIT_CHANCE,
+                        textAttacked = RADAR_TEXT_ATTACKED,
+                        textTooStrong = RADAR_TEXT_WAS_TOO_STRONG,
+                        enemyEvadeRoll = Random.nextInt(100),
+                        criticalRoll = Random.nextInt(100),
+                    )
 
-                    if (playerHp <= 1) {
-                        applyRadarLossPenalty(currentEngine)
-                        shouldPersist = true
-                    }
-                } else {
-                    val isCritical = Random.nextInt(100) < RADAR_ATTACK_CRIT_CHANCE
-                    val damage = if (isCritical) 2 else 1
-                    enemyHp = (enemyHp - damage).coerceAtLeast(0)
-                    enemyResponded = enemyHp > 0
-                    pendingCriticalMessage = isCritical
-
-                    if (enemyResponded) {
-                        playerHp = (playerHp - 1).coerceAtLeast(0)
-                    }
-                    pendingEnemyCounterAttack = enemyResponded && playerHp > 0
-
-                    battleAnimation =
-                        if (isCritical) {
-                            RadarBattleAnimation.AttackCrit
-                        } else {
-                            RadarBattleAnimation.AttackHit
-                        }
-
-                    if (playerHp <= 0) {
-                        messageOffset = RADAR_TEXT_WAS_TOO_STRONG
-                        returnHome = true
-                        pendingEnemyCounterAttack = false
-                        pendingCriticalMessage = false
-                        applyRadarLossPenalty(currentEngine)
-                        shouldPersist = true
-                        persistMessage = "Your Pokemon was overpowered."
-                    } else {
-                        messageOffset = RADAR_TEXT_ATTACKED
-                        persistMessage =
-                            if (isCritical && enemyResponded) {
-                                "Critical hit landed. Enemy struck back. Enemy HP: $enemyHp/$RADAR_MAX_HP."
-                            } else if (isCritical) {
-                                "Critical hit landed. Enemy HP: $enemyHp/$RADAR_MAX_HP."
-                            } else if (enemyResponded) {
-                                "Attack landed. Enemy struck back. Enemy HP: $enemyHp/$RADAR_MAX_HP."
-                            } else {
-                                "Attack landed. Enemy HP: $enemyHp/$RADAR_MAX_HP."
-                            }
-                    }
-
-                    if (enemyHp <= 0) {
-                        returnHome = true
-                        shouldPersist = true
-                        pendingEnemyCounterAttack = false
-                        currentEngine.setLastSyncNow(Instant.now().epochSecond)
-                        persistMessage =
-                            if (enemyResponded) {
-                                "Enemy was defeated after trading blows."
-                            } else {
-                                "Enemy was defeated."
-                            }
-                    }
-
-                    if (!returnHome) {
-                        persistMessage =
-                            if (isCritical && enemyResponded) {
-                                "Critical hit landed. Enemy struck back. Enemy HP: $enemyHp/$RADAR_MAX_HP."
-                            } else if (isCritical) {
-                                "Critical hit landed. Enemy HP: $enemyHp/$RADAR_MAX_HP."
-                            } else if (enemyResponded) {
-                                "Attack landed. Enemy struck back. Enemy HP: $enemyHp/$RADAR_MAX_HP."
-                            } else {
-                                "Attack landed. Enemy HP: $enemyHp/$RADAR_MAX_HP."
-                            }
-                    }
+                if (turn.applyLossPenalty) {
+                    applyRadarLossPenalty(currentEngine)
                 }
+                if (turn.touchLastSyncNow) {
+                    currentEngine.setLastSyncNow(Instant.now().epochSecond)
+                }
+
+                playerHp = turn.playerHp
+                enemyHp = turn.enemyHp
+                enemyResponded = turn.enemyResponded
+                messageUsesEnemyName = turn.messageUsesEnemyName
+                pendingEnemyCounterAttack = turn.pendingEnemyCounterAttack
+                pendingCriticalMessage = turn.pendingCriticalMessage
+                messageOffset = turn.messageOffset
+                returnHome = turn.returnHome
+                persistMessage = turn.persistMessage
+                shouldPersist = turn.shouldPersist
+                battleAnimation = turn.battleAnimation
             }
 
             RadarBattleAction.Evade -> {
-                val roll = Random.nextInt(100)
-                when {
-                    roll < RADAR_EVADE_COUNTER_CHANCE -> {
-                        enemyHp = (enemyHp - 1).coerceAtLeast(0)
-                        messageOffset = RADAR_TEXT_EVADED
-                        battleAnimation = RadarBattleAnimation.EvadeCounter
-                        persistMessage = "Evaded and countered. Enemy HP: $enemyHp/$RADAR_MAX_HP."
-                    }
+                val turn =
+                    resolveRadarEvadeTurn(
+                        state = interactionState,
+                        counterChancePercent = RADAR_EVADE_COUNTER_CHANCE,
+                        stareChancePercent = RADAR_EVADE_STARE_CHANCE,
+                        textEvaded = RADAR_TEXT_EVADED,
+                        textGotAway = RADAR_TEXT_GOT_AWAY,
+                        roll = Random.nextInt(100),
+                        radarMaxHp = RADAR_MAX_HP,
+                    )
 
-                    roll < RADAR_EVADE_COUNTER_CHANCE + RADAR_EVADE_STARE_CHANCE -> {
-                        messageOffset = RADAR_TEXT_EVADED
-                        battleAnimation = RadarBattleAnimation.EvadeStandoff
-                        persistMessage = "Both Pokemon hesitated."
-                    }
-
-                    else -> {
-                        messageOffset = RADAR_TEXT_GOT_AWAY
-                        returnHome = true
-                        battleAnimation = RadarBattleAnimation.EvadeEnemyFlee
-                        persistMessage = "Wild Pokemon ran away."
-                    }
-                }
+                playerHp = turn.playerHp
+                enemyHp = turn.enemyHp
+                enemyResponded = turn.enemyResponded
+                messageUsesEnemyName = turn.messageUsesEnemyName
+                pendingEnemyCounterAttack = turn.pendingEnemyCounterAttack
+                pendingCriticalMessage = turn.pendingCriticalMessage
+                messageOffset = turn.messageOffset
+                returnHome = turn.returnHome
+                persistMessage = turn.persistMessage
+                shouldPersist = turn.shouldPersist
+                battleAnimation = turn.battleAnimation
             }
 
             RadarBattleAction.Catch -> {
-                val throwSucceeded = Random.nextInt(100) < radarCatchChancePercent(enemyHp)
+                val throwSucceeded = Random.nextInt(100) < radarCatchChanceByEnemyHp(enemyHp)
                 var caught = false
                 var catchOverflowRouteSlot: Int? = null
 
@@ -991,98 +893,38 @@ class EmulatorViewModel(
     }
 
     private fun handleRadarBattleMessageEnter() {
-        if (isRadarBattleAnimationActive()) {
-            refreshState("Battle animation in progress.")
-            return
-        }
-
-        if (
-            interactionState.radarBattleMessageOffset == RADAR_TEXT_GOT_AWAY ||
-            interactionState.radarBattleMessageOffset == RADAR_TEXT_FLED
-        ) {
-            resetRadarToHome("Wild Pokemon got away. Returning Home.", outcome = false)
-            return
-        }
-
-        if (interactionState.radarBattleMessageOffset == RADAR_TEXT_WAS_TOO_STRONG) {
-            resetRadarToHome("Your Pokemon was overpowered. Returning Home.", outcome = false)
-            return
-        }
-
-        when (interactionState.radarBattleMessageOffset) {
-            RADAR_TEXT_FOUND_SOMETHING -> {
-                interactionState =
-                    interactionState.copy(
-                        radarMode = RadarMode.BattleMessage,
-                        radarBattleMessageOffset = RADAR_TEXT_APPEARED,
-                        radarBattleAnimation = RadarBattleAnimation.None,
-                        radarBattleAnimTicksRemaining = 0,
-                    )
-                refreshState("A wild Pokemon appeared.")
-                return
-            }
-
-            RADAR_TEXT_THROW_POKEBALL -> {
-                refreshState("Pokeball sequence in progress.")
-                return
-            }
-
-            RADAR_TEXT_APPEARED -> {
-                interactionState =
-                    interactionState.copy(
-                        radarMode = RadarMode.BattleMenu,
-                        radarBattleMessageOffset = null,
-                        radarBattleEnemyResponded = false,
-                        radarBattleMessageUsesEnemyName = false,
-                        radarBattlePendingEnemyCounterAttack = false,
-                        radarBattlePendingCriticalMessage = false,
-                        radarBattleAnimation = RadarBattleAnimation.None,
-                        radarBattleAnimTicksRemaining = 0,
-                    )
-                refreshState("Choose ATTACK, ENTER to CATCH, or EVADE.")
-                return
-            }
-
-            else -> {
-                // Continue with default handling below.
-            }
-        }
-
-        if (
-            interactionState.radarBattleMessageOffset == RADAR_TEXT_CRITICAL_HIT &&
-            interactionState.radarBattlePendingEnemyCounterAttack
-        ) {
-            interactionState =
-                interactionState.copy(
-                    radarBattleMessageOffset = RADAR_TEXT_ATTACKED,
-                    radarBattleMessageUsesEnemyName = true,
-                    radarBattlePendingEnemyCounterAttack = false,
-                    radarBattlePendingCriticalMessage = false,
-                    radarBattleAnimation = RadarBattleAnimation.EnemyAttack,
-                    radarBattleAnimTicksRemaining =
-                        radarBattleAnimationTicks(RadarBattleAnimation.EnemyAttack),
+        when (
+            val resolution =
+                resolveRadarBattleMessageEnter(
+                    state = interactionState,
+                    isBattleAnimationActive = isRadarBattleAnimationActive(),
+                    offsets =
+                        RadarMessageEnterOffsets(
+                            foundSomething = RADAR_TEXT_FOUND_SOMETHING,
+                            appeared = RADAR_TEXT_APPEARED,
+                            throwPokeball = RADAR_TEXT_THROW_POKEBALL,
+                            gotAway = RADAR_TEXT_GOT_AWAY,
+                            fled = RADAR_TEXT_FLED,
+                            wasTooStrong = RADAR_TEXT_WAS_TOO_STRONG,
+                            criticalHit = RADAR_TEXT_CRITICAL_HIT,
+                            attacked = RADAR_TEXT_ATTACKED,
+                        ),
+                    enemyAttackAnimationTicks = radarBattleAnimationTicks(RadarBattleAnimation.EnemyAttack),
                 )
-            refreshState("Enemy counterattack.")
-            return
-        }
+        ) {
+            is RadarBattleMessageEnterResolution.ResetToHome -> {
+                resetRadarToHome(resolution.statusMessage, outcome = resolution.outcome)
+            }
 
-        if (interactionState.radarBattleReturnToMenu) {
-            resetRadarToHome("Radar battle finished. Returning Home.")
-            return
-        }
+            is RadarBattleMessageEnterResolution.RefreshOnly -> {
+                refreshState(resolution.statusMessage)
+            }
 
-        interactionState =
-            interactionState.copy(
-                radarMode = RadarMode.BattleMenu,
-                radarBattleMessageOffset = null,
-                radarBattleEnemyResponded = false,
-                radarBattleMessageUsesEnemyName = false,
-                radarBattlePendingEnemyCounterAttack = false,
-                radarBattlePendingCriticalMessage = false,
-                radarBattleAnimation = RadarBattleAnimation.None,
-                radarBattleAnimTicksRemaining = 0,
-            )
-        refreshState("Choose ATTACK, EVADE or CATCH.")
+            is RadarBattleMessageEnterResolution.UpdateState -> {
+                interactionState = resolution.state
+                refreshState(resolution.statusMessage)
+            }
+        }
     }
 
     private fun advanceRadarBattleMessageByAnyButton() {
@@ -1108,25 +950,7 @@ class EmulatorViewModel(
     }
 
     private fun cancelDowsingSwap() {
-        interactionState =
-            interactionState.copy(
-                screen = DeviceScreen.Home,
-                dowsingCursor = 0,
-                dowsingOutcome = null,
-                dowsingGameOver = false,
-                dowsingWon = null,
-                dowsingMode = DowsingMode.Search,
-                dowsingRevealCursor = -1,
-                dowsingSwapCursor = 0,
-                dowsingRevealTicksRemaining = 0,
-                dowsingPendingFound = false,
-                dowsingPendingNear = false,
-                dowsingPendingStored = false,
-                dowsingCheckedMask = 0,
-                dowsingResultItemIndex = null,
-                dowsingFeedback = DowsingFeedback.None,
-                dowsingIdleTicksRemaining = 0,
-            )
+        interactionState = resetDowsingStateToHome(interactionState)
         refreshState("Cancelled item swap and kept current items.")
     }
 
@@ -1172,25 +996,7 @@ class EmulatorViewModel(
         }
 
         if (!hasWalkingPokemon()) {
-            interactionState =
-                interactionState.copy(
-                    screen = DeviceScreen.Home,
-                    dowsingCursor = 0,
-                    dowsingOutcome = null,
-                    dowsingGameOver = false,
-                    dowsingWon = null,
-                    dowsingMode = DowsingMode.Search,
-                    dowsingRevealCursor = -1,
-                    dowsingSwapCursor = 0,
-                    dowsingRevealTicksRemaining = 0,
-                    dowsingPendingFound = false,
-                    dowsingPendingNear = false,
-                    dowsingPendingStored = false,
-                    dowsingCheckedMask = 0,
-                    dowsingResultItemIndex = null,
-                    dowsingFeedback = DowsingFeedback.None,
-                    dowsingIdleTicksRemaining = 0,
-                )
+            interactionState = resetDowsingStateToHome(interactionState)
             refreshState("No Pokemon held. Returning Home.")
             return
         }
@@ -1227,41 +1033,27 @@ class EmulatorViewModel(
                     }
 
                 interactionState =
-                    interactionState.copy(
-                        dowsingMode = DowsingMode.Reveal,
-                        dowsingRevealCursor = selected,
-                        dowsingRevealTicksRemaining = DOWSING_REVEAL_TICKS,
-                        dowsingPendingFound = found,
-                        dowsingPendingNear = near,
-                        dowsingPendingStored = stored,
-                        dowsingTargetItemIndex = resolvedItemIndex,
-                        dowsingCheckedMask = checkedMask,
-                        dowsingAttemptsRemaining = remaining,
-                        dowsingFeedback = DowsingFeedback.None,
+                    startDowsingReveal(
+                        state = interactionState,
+                        selectedCursor = selected,
+                        found = found,
+                        near = near,
+                        stored = stored,
+                        resolvedItemIndex = resolvedItemIndex,
+                        checkedMask = checkedMask,
+                        remainingAttempts = remaining,
+                        revealTicks = DOWSING_REVEAL_TICKS,
                     )
                 refreshState("Dowsing scan...")
             }
 
             DowsingMode.MissMessage -> {
-                interactionState =
-                    interactionState.copy(
-                        dowsingMode = DowsingMode.HintMessage,
-                        dowsingFeedback = if (interactionState.dowsingPendingNear) DowsingFeedback.Near else DowsingFeedback.Far,
-                    )
+                interactionState = enterDowsingHintState(interactionState)
                 refreshState("Hint shown. ENTER to continue.")
             }
 
             DowsingMode.HintMessage -> {
-                interactionState =
-                    interactionState.copy(
-                        dowsingMode = DowsingMode.Search,
-                        dowsingRevealCursor = -1,
-                        dowsingRevealTicksRemaining = 0,
-                        dowsingPendingFound = false,
-                        dowsingPendingNear = false,
-                        dowsingPendingStored = false,
-                        dowsingFeedback = DowsingFeedback.None,
-                    )
+                interactionState = enterDowsingSearchState(interactionState)
                 refreshState("Discover an item!")
             }
 
@@ -1273,61 +1065,18 @@ class EmulatorViewModel(
                 if (!interactionState.dowsingPendingStored) {
                     val pendingItemIndex = interactionState.dowsingResultItemIndex
                     if (pendingItemIndex == null) {
-                        interactionState =
-                            interactionState.copy(
-                                screen = DeviceScreen.Home,
-                                dowsingCursor = 0,
-                                dowsingOutcome = null,
-                                dowsingGameOver = false,
-                                dowsingWon = null,
-                                dowsingMode = DowsingMode.Search,
-                                dowsingRevealCursor = -1,
-                                dowsingSwapCursor = 0,
-                                dowsingRevealTicksRemaining = 0,
-                                dowsingPendingFound = false,
-                                dowsingPendingNear = false,
-                                dowsingPendingStored = false,
-                                dowsingCheckedMask = 0,
-                                dowsingResultItemIndex = null,
-                                dowsingFeedback = DowsingFeedback.None,
-                                dowsingIdleTicksRemaining = 0,
-                            )
+                        interactionState = resetDowsingStateToHome(interactionState)
                         refreshState("No found item to swap. Returning Home.")
                         return
                     }
 
-                    interactionState =
-                        interactionState.copy(
-                            dowsingMode = DowsingMode.Swap,
-                            dowsingSwapCursor = 0,
-                            dowsingRevealCursor = -1,
-                            dowsingRevealTicksRemaining = 0,
-                            dowsingResultItemIndex = pendingItemIndex,
-                        )
+                    interactionState = enterDowsingSwapState(interactionState, pendingItemIndex)
                     refreshState("Bag is full. Choose which item to replace.")
                     return
                 }
 
                 currentEngine.setLastSyncNow(Instant.now().epochSecond)
-                interactionState =
-                    interactionState.copy(
-                        screen = DeviceScreen.Home,
-                        dowsingCursor = 0,
-                        dowsingOutcome = null,
-                        dowsingGameOver = false,
-                        dowsingWon = null,
-                        dowsingMode = DowsingMode.Search,
-                        dowsingRevealCursor = -1,
-                        dowsingSwapCursor = 0,
-                        dowsingRevealTicksRemaining = 0,
-                        dowsingPendingFound = false,
-                        dowsingPendingNear = false,
-                        dowsingPendingStored = false,
-                        dowsingCheckedMask = 0,
-                        dowsingResultItemIndex = null,
-                        dowsingFeedback = DowsingFeedback.None,
-                        dowsingIdleTicksRemaining = 0,
-                    )
+                interactionState = resetDowsingStateToHome(interactionState)
 
                 viewModelScope.launch {
                     persistAndRefresh("Dowsing finished: item stored.")
@@ -1337,25 +1086,7 @@ class EmulatorViewModel(
             DowsingMode.Swap -> {
                 val pendingItemIndex = interactionState.dowsingResultItemIndex
                 if (pendingItemIndex == null) {
-                    interactionState =
-                        interactionState.copy(
-                            screen = DeviceScreen.Home,
-                            dowsingCursor = 0,
-                            dowsingOutcome = null,
-                            dowsingGameOver = false,
-                            dowsingWon = null,
-                            dowsingMode = DowsingMode.Search,
-                            dowsingRevealCursor = -1,
-                            dowsingSwapCursor = 0,
-                            dowsingRevealTicksRemaining = 0,
-                            dowsingPendingFound = false,
-                            dowsingPendingNear = false,
-                            dowsingPendingStored = false,
-                            dowsingCheckedMask = 0,
-                            dowsingResultItemIndex = null,
-                            dowsingFeedback = DowsingFeedback.None,
-                            dowsingIdleTicksRemaining = 0,
-                        )
+                    interactionState = resetDowsingStateToHome(interactionState)
                     refreshState("No found item to swap. Returning Home.")
                     return
                 }
@@ -1363,49 +1094,13 @@ class EmulatorViewModel(
                 val replaceSlot = interactionState.dowsingSwapCursor.coerceIn(0, DeviceOffsets.DOWSED_ITEM_COUNT - 1)
                 val replaced = currentEngine.replaceDowsedItemWithRoute(replaceSlot, pendingItemIndex)
                 if (!replaced) {
-                    interactionState =
-                        interactionState.copy(
-                            screen = DeviceScreen.Home,
-                            dowsingCursor = 0,
-                            dowsingOutcome = null,
-                            dowsingGameOver = false,
-                            dowsingWon = null,
-                            dowsingMode = DowsingMode.Search,
-                            dowsingRevealCursor = -1,
-                            dowsingSwapCursor = 0,
-                            dowsingRevealTicksRemaining = 0,
-                            dowsingPendingFound = false,
-                            dowsingPendingNear = false,
-                            dowsingPendingStored = false,
-                            dowsingCheckedMask = 0,
-                            dowsingResultItemIndex = null,
-                            dowsingFeedback = DowsingFeedback.None,
-                            dowsingIdleTicksRemaining = 0,
-                        )
+                    interactionState = resetDowsingStateToHome(interactionState)
                     refreshState("Could not swap item. Returning Home.")
                     return
                 }
 
                 currentEngine.setLastSyncNow(Instant.now().epochSecond)
-                interactionState =
-                    interactionState.copy(
-                        screen = DeviceScreen.Home,
-                        dowsingCursor = 0,
-                        dowsingOutcome = null,
-                        dowsingGameOver = false,
-                        dowsingWon = null,
-                        dowsingMode = DowsingMode.Search,
-                        dowsingRevealCursor = -1,
-                        dowsingSwapCursor = 0,
-                        dowsingRevealTicksRemaining = 0,
-                        dowsingPendingFound = false,
-                        dowsingPendingNear = false,
-                        dowsingPendingStored = false,
-                        dowsingCheckedMask = 0,
-                        dowsingResultItemIndex = null,
-                        dowsingFeedback = DowsingFeedback.None,
-                        dowsingIdleTicksRemaining = 0,
-                    )
+                interactionState = resetDowsingStateToHome(interactionState)
 
                 viewModelScope.launch {
                     persistAndRefresh("Swapped found item and kept the new one.")
@@ -1413,25 +1108,7 @@ class EmulatorViewModel(
             }
 
             DowsingMode.EndMessage -> {
-                interactionState =
-                    interactionState.copy(
-                        screen = DeviceScreen.Home,
-                        dowsingCursor = 0,
-                        dowsingOutcome = null,
-                        dowsingGameOver = false,
-                        dowsingWon = null,
-                        dowsingMode = DowsingMode.Search,
-                        dowsingRevealCursor = -1,
-                        dowsingSwapCursor = 0,
-                        dowsingRevealTicksRemaining = 0,
-                        dowsingPendingFound = false,
-                        dowsingPendingNear = false,
-                        dowsingPendingStored = false,
-                        dowsingCheckedMask = 0,
-                        dowsingResultItemIndex = null,
-                        dowsingFeedback = DowsingFeedback.None,
-                        dowsingIdleTicksRemaining = 0,
-                    )
+                interactionState = resetDowsingStateToHome(interactionState)
                 refreshState("Dowsing finished: returning Home.")
             }
         }
@@ -1446,7 +1123,7 @@ class EmulatorViewModel(
         val eepromInfo = eepromStorage.getFileInfo()
 
         val snapshot = currentEngine.snapshot(validation.mirrorInSync)
-        val assetsStatus = requiredAssetsStatus(validation, eepromInfo)
+        val assetsStatus = currentRequiredAssetsStatus(validation, eepromInfo)
         val caughtCount = DeviceBinary.countCaughtPokemon(eeprom)
         val foundItemsCount = DeviceBinary.countFoundItems(eeprom)
 
@@ -1491,7 +1168,12 @@ class EmulatorViewModel(
                 lcdSceneLabel = interactionState.screen.label,
                 lcdHasVisualContent = preview.hasVisualContent,
                 selectedMenuLabel = selectedMenu,
-                actionHint = actionHintForCurrentScreen(),
+                actionHint =
+                    buildActionHintForScreen(
+                        state = interactionState,
+                        hasWalkingPokemon = hasWalkingPokemon(),
+                        radarAnimationActive = isRadarBattleAnimationActive(),
+                    ),
                 caughtPokemonCount = caughtCount,
                 foundItemCount = foundItemsCount,
                 totalActions = totalActions,
@@ -1512,142 +1194,42 @@ class EmulatorViewModel(
         val eeprom = currentEngine.exportEeprom()
         val validation = EepromValidator.validate(eeprom)
         val eepromInfo = eepromStorage.getFileInfo()
-        return requiredAssetsStatus(validation, eepromInfo)
+        return currentRequiredAssetsStatus(validation, eepromInfo)
     }
 
-    private fun requiredAssetsStatus(
+    private fun currentRequiredAssetsStatus(
         validation: EepromValidationReport,
         eepromInfo: EepromFileInfo,
     ): RequiredAssetsStatus {
-        val issues = mutableListOf<String>()
-
-        if (!eepromInfo.exists) {
-            issues += "Copy eeprom.bin to $MANUAL_FILES_DIRECTORY"
-        }
-
-        if (!validation.isValidSize) {
-            issues += "Current EEPROM size is invalid (expected ${DeviceOffsets.EEPROM_SIZE} bytes)."
-        }
-
-        if (issues.isEmpty()) {
-            val signatureWarning =
-                if (validation.hasNintendoSignature) {
-                    ""
-                } else {
-                    " (signature mismatch; using raw EEPROM)"
-                }
-            return RequiredAssetsStatus(
-                ready = true,
-                message = "Required assets ready: eeprom.bin found in $MANUAL_FILES_DIRECTORY$signatureWarning",
+        val (ready, message) =
+            computeRequiredAssetsStatus(
+                validation = validation,
+                eepromInfo = eepromInfo,
+                manualDirectory = MANUAL_FILES_DIRECTORY,
+                expectedSizeBytes = DeviceOffsets.EEPROM_SIZE,
             )
-        }
-
         return RequiredAssetsStatus(
-            ready = false,
-            message = issues.joinToString(" "),
+            ready = ready,
+            message = message,
         )
-    }
-
-    private fun actionHintForCurrentScreen(): String {
-        return when (interactionState.screen) {
-            DeviceScreen.Home -> {
-                if (!hasWalkingPokemon()) {
-                    "No Pokemon held. ENTER: menu (Connect)"
-                } else if (interactionState.homeEventType != null) {
-                    "ENTER: collect event"
-                } else {
-                    "ENTER: menu"
-                }
-            }
-            DeviceScreen.Menu -> "LEFT/RIGHT: navigate, ENTER: open, idle: Home"
-            DeviceScreen.Radar ->
-                when (interactionState.radarMode) {
-                    RadarMode.Scan ->
-                        if (interactionState.radarOutcome == false && interactionState.radarSignalCursor == null) {
-                            "It got away. ENTER: return Home"
-                        } else if (interactionState.radarSignalCursor == null) {
-                            "Signal ended"
-                        } else {
-                            "Signal active (${interactionState.radarChainProgress}/${interactionState.radarChainTarget}): align cursor and ENTER quickly"
-                        }
-                    RadarMode.BattleMenu ->
-                        "LEFT: ATTACK, ENTER: CATCH, RIGHT: EVADE (HP ${interactionState.radarPlayerHp}/${interactionState.radarEnemyHp})"
-                    RadarMode.BattleMessage ->
-                        if (isRadarBattleAnimationActive()) {
-                            "Battle animation..."
-                        } else {
-                            "LEFT/ENTER/RIGHT: continue"
-                        }
-                    RadarMode.BattleSwap ->
-                        "LEFT/RIGHT choose slot, LEFT at first cancels, ENTER confirm"
-                }
-            DeviceScreen.Dowsing -> {
-                if (
-                    interactionState.dowsingMode == DowsingMode.FoundMessage &&
-                    !interactionState.dowsingPendingStored
-                ) {
-                    "ENTER: choose item to replace"
-                } else if (
-                    interactionState.dowsingMode == DowsingMode.FoundMessage ||
-                    interactionState.dowsingMode == DowsingMode.EndMessage
-                ) {
-                    "ENTER: return Home"
-                } else if (interactionState.dowsingMode == DowsingMode.Swap) {
-                    "LEFT/RIGHT choose slot, LEFT at first cancels, ENTER confirm"
-                } else if (interactionState.dowsingMode == DowsingMode.Reveal) {
-                    "Scanning..."
-                } else if (interactionState.dowsingMode == DowsingMode.MissMessage) {
-                    "ENTER: continue"
-                } else if (interactionState.dowsingMode == DowsingMode.HintMessage) {
-                    "ENTER: continue"
-                } else {
-                    "LEFT/RIGHT move, ENTER search, attempts=${interactionState.dowsingAttemptsRemaining}"
-                }
-            }
-            DeviceScreen.Connect -> "ENTER: return menu"
-            DeviceScreen.Card -> "LEFT/RIGHT switch pages, ENTER: return menu"
-            DeviceScreen.Pokemon -> "LEFT: previous (first exits), RIGHT: next, ENTER: return menu"
-            DeviceScreen.Settings ->
-                when (interactionState.settingsMode) {
-                    DeviceSettingsMode.SelectField -> "LEFT/RIGHT choose Sound or Shade, ENTER"
-                    DeviceSettingsMode.AdjustSound -> "LEFT/RIGHT volume level, ENTER confirm and exit"
-                    DeviceSettingsMode.AdjustShade -> "LEFT/RIGHT shade slider, ENTER confirm and exit"
-                }
-        }
     }
 
     private fun pokemonEntryCount(): Int {
         val currentEngine = engine ?: return 1
-        val eeprom = currentEngine.exportEeprom()
-        val walking = if (DeviceBinary.readWalkingPokemonSpecies(eeprom) != 0) 1 else 0
-        val caught = DeviceBinary.countCaughtPokemon(eeprom)
-        var items = 0
-        for (slot in 0 until DeviceOffsets.DOWSED_ITEM_COUNT) {
-            if (DeviceBinary.readDowsedItemId(eeprom, slot) != 0) {
-                items += 1
-            }
-        }
-        return (walking + caught + items).coerceAtLeast(1)
+        return countPokemonEntriesFromEeprom(currentEngine.exportEeprom())
     }
 
     private fun maxCardPageIndex(): Int {
         val currentEngine = engine ?: return 0
-        val eeprom = currentEngine.exportEeprom()
-        return DeviceBinary.stepHistoryCount(eeprom).coerceAtLeast(0)
+        return maxCardPageIndexFromEeprom(currentEngine.exportEeprom())
     }
 
     private fun previousSettingsField(field: DeviceSettingsField): DeviceSettingsField {
-        return when (field) {
-            DeviceSettingsField.Sound -> DeviceSettingsField.Shade
-            DeviceSettingsField.Shade -> DeviceSettingsField.Sound
-        }
+        return previousSettingsFieldValue(field)
     }
 
     private fun nextSettingsField(field: DeviceSettingsField): DeviceSettingsField {
-        return when (field) {
-            DeviceSettingsField.Sound -> DeviceSettingsField.Shade
-            DeviceSettingsField.Shade -> DeviceSettingsField.Sound
-        }
+        return nextSettingsFieldValue(field)
     }
 
     private fun startAnimationLoop() {
@@ -1708,7 +1290,7 @@ class EmulatorViewModel(
                             val nextSignal = rollRadarSignal()
                             interactionState.copy(
                                 radarResolvedCursor = currentSignal,
-                                radarSignalCursor = randomNextRadarSignalCursor(currentSignal),
+                                radarSignalCursor = randomRadarSignalCursor(currentSignal),
                                 radarSignalTicksRemaining = randomRadarSignalWindowTicks(),
                                 radarSignalLevel = nextSignal.signalLevel,
                                 radarSignalRouteSlot = nextSignal.routeSlot,
@@ -1776,447 +1358,82 @@ class EmulatorViewModel(
     }
 
     private fun tickHomeInteraction(state: DeviceInteractionState): DeviceInteractionState {
-        if (!hasWalkingPokemon()) {
-            return state.copy(
-                homeEventType = null,
-                homeEventMusicBubble = false,
-                homeEventTicksRemaining = 0,
-                homeEventItemIndex = 0,
-            )
-        }
-
-        if (state.homeEventType != null) {
-            val remaining = state.homeEventTicksRemaining - 1
-            if (remaining <= 0) {
-                return state.copy(
-                    homeEventType = null,
-                    homeEventMusicBubble = false,
-                    homeEventTicksRemaining = 0,
-                    homeEventItemIndex = 0,
-                )
-            }
-            return state.copy(homeEventTicksRemaining = remaining)
-        }
-
-        if (Random.nextInt(100) >= HOME_EVENT_SPAWN_CHANCE_PERCENT) {
-            return state
-        }
-
-        val eventType = randomHomeEventType()
-        val itemIndex = if (eventType == HomeEventType.Item) rollDowsingRouteItemIndex() else 0
-
-        return state.copy(
-            homeEventType = eventType,
-            homeEventMusicBubble = Random.nextBoolean(),
-            homeEventTicksRemaining = Random.nextInt(HOME_EVENT_MIN_TICKS, HOME_EVENT_MAX_TICKS + 1),
-            homeEventItemIndex = itemIndex,
+        return nextHomeInteractionState(
+            state = state,
+            hasWalkingPokemon = hasWalkingPokemon(),
+            spawnChancePercent = HOME_EVENT_SPAWN_CHANCE_PERCENT,
+            minEventTicks = HOME_EVENT_MIN_TICKS,
+            maxEventTicks = HOME_EVENT_MAX_TICKS,
+            randomEventType = ::chooseRandomHomeEventType,
+            randomItemIndex = ::rollDowsingRouteItemIndex,
         )
-    }
-
-    private fun randomHomeEventType(): HomeEventType {
-        val roll = Random.nextInt(100)
-        return when {
-            roll < 35 -> HomeEventType.Watts10
-            roll < 65 -> HomeEventType.Watts20
-            roll < 80 -> HomeEventType.Watts50
-            else -> HomeEventType.Item
-        }
     }
 
     private fun randomAvailableRouteItemIndex(): Int {
         val currentEngine = engine ?: return Random.nextInt(DeviceOffsets.ROUTE_ITEM_COUNT)
-        val eeprom = currentEngine.exportEeprom()
-        val availableRouteItems =
-            (0 until DeviceOffsets.ROUTE_ITEM_COUNT)
-                .filter { index ->
-                    DeviceBinary.readRouteItemId(eeprom, index) != 0
-                }
-
-        return if (availableRouteItems.isEmpty()) {
-            Random.nextInt(DeviceOffsets.ROUTE_ITEM_COUNT)
-        } else {
-            availableRouteItems.random()
-        }
+        return randomRouteItemIndexFromEeprom(currentEngine.exportEeprom())
     }
 
     private fun rollDowsingRouteItemIndex(): Int {
         val currentEngine = engine ?: return randomAvailableRouteItemIndex()
-        val eeprom = currentEngine.exportEeprom()
-        val stepCount = currentWalkStepCount(eeprom)
-
-        var fallbackIndex = -1
-
-        for (index in 0 until DeviceOffsets.ROUTE_ITEM_COUNT) {
-            val itemId = DeviceBinary.readRouteItemId(eeprom, index)
-            if (itemId == 0) {
-                continue
-            }
-
-            fallbackIndex = index
-
-            val minSteps = DeviceBinary.readRouteItemMinSteps(eeprom, index).coerceAtLeast(0)
-            if (stepCount < minSteps) {
-                continue
-            }
-
-            val chance = DeviceBinary.readRouteItemChance(eeprom, index).coerceIn(0, 100)
-            if (chance <= 0) {
-                continue
-            }
-
-            if (Random.nextInt(100) < chance) {
-                return index
-            }
-        }
-
-        return if (fallbackIndex >= 0) {
-            fallbackIndex
-        } else {
-            randomAvailableRouteItemIndex()
-        }
-    }
-
-    private fun currentWalkStepCount(eeprom: ByteArray): Int {
-        val todaySteps = DeviceBinary.readHealthTodaySteps(eeprom)
-        if (todaySteps > 0) {
-            return todaySteps
-        }
-
-        val identitySteps =
-            DeviceBinary.readU32BE(eeprom, DeviceOffsets.IDENTITY_STEP_COUNT_OFFSET)
-                .coerceIn(0L, Int.MAX_VALUE.toLong())
-                .toInt()
-        if (identitySteps > 0) {
-            return identitySteps
-        }
-
-        return DeviceBinary.readHealthLifetimeSteps(eeprom)
+        return rollDowsingRouteItemIndexFromEeprom(currentEngine.exportEeprom())
     }
 
     private fun hasWalkingPokemon(): Boolean {
         val currentEngine = engine ?: return false
-        return hasWalkingPokemon(currentEngine.exportEeprom())
-    }
-
-    private fun hasWalkingPokemon(eeprom: ByteArray): Boolean {
-        return DeviceBinary.readWalkingPokemonSpecies(eeprom) != 0
+        return hasWalkingPokemonInEeprom(currentEngine.exportEeprom())
     }
 
     private fun randomMenuIdleTicks(): Int {
-        return Random.nextInt(MENU_IDLE_MIN_TICKS, MENU_IDLE_MAX_TICKS + 1)
+        return randomTicksInRange(MENU_IDLE_MIN_TICKS, MENU_IDLE_MAX_TICKS)
     }
 
     private fun randomSettingsIdleTicks(): Int {
-        return Random.nextInt(SETTINGS_IDLE_MIN_TICKS, SETTINGS_IDLE_MAX_TICKS + 1)
+        return randomTicksInRange(SETTINGS_IDLE_MIN_TICKS, SETTINGS_IDLE_MAX_TICKS)
     }
 
     private fun randomDowsingIdleTicks(): Int {
-        return Random.nextInt(DOWSING_IDLE_MIN_TICKS, DOWSING_IDLE_MAX_TICKS + 1)
+        return randomTicksInRange(DOWSING_IDLE_MIN_TICKS, DOWSING_IDLE_MAX_TICKS)
     }
 
     private fun randomRadarSignalWindowTicks(): Int {
-        return Random.nextInt(RADAR_SIGNAL_MIN_TICKS, RADAR_SIGNAL_MAX_TICKS + 1)
+        return randomTicksInRange(RADAR_SIGNAL_MIN_TICKS, RADAR_SIGNAL_MAX_TICKS)
     }
 
     private fun randomRadarChainTarget(): Int {
         return 1
     }
 
-    private data class RadarSignal(
-        val routeSlot: Int,
-        val signalLevel: Int,
-    )
-
     private fun rollRadarSignal(): RadarSignal {
         val currentEngine = engine ?: return RadarSignal(routeSlot = 0, signalLevel = 1)
-        val eeprom = currentEngine.exportEeprom()
-        val slot = rollRadarRouteSlot(eeprom)
-        return RadarSignal(
-            routeSlot = slot,
-            signalLevel = signalLevelForRouteSlot(eeprom, slot),
-        )
-    }
-
-    private fun signalLevelForRouteSlot(
-        eeprom: ByteArray,
-        slot: Int,
-    ): Int {
-        val available =
-            (0 until DeviceOffsets.POKEMON_SLOT_COUNT)
-                .mapNotNull { candidate ->
-                    val species = DeviceBinary.readRoutePokemonSpecies(eeprom, candidate)
-                    if (species == 0) {
-                        null
-                    } else {
-                        val chance = DeviceBinary.readRoutePokemonChance(eeprom, candidate).coerceIn(0, 100)
-                        candidate to chance
-                    }
-                }
-                .sortedByDescending { (_, chance) -> chance }
-
-        val rank = available.indexOfFirst { (candidate, _) -> candidate == slot }
-        return when (rank) {
-            0 -> 1
-            1 -> 2
-            2 -> 3
-            else -> (slot + 1).coerceIn(1, 3)
-        }
-    }
-
-    private fun rollRadarRouteSlot(eeprom: ByteArray): Int {
-        val stepCount = currentWalkStepCount(eeprom)
-        var fallbackSlot = -1
-        val weighted = mutableListOf<Pair<Int, Int>>()
-
-        for (slot in 0 until DeviceOffsets.POKEMON_SLOT_COUNT) {
-            val species = DeviceBinary.readRoutePokemonSpecies(eeprom, slot)
-            if (species == 0) {
-                continue
-            }
-
-            if (fallbackSlot < 0) {
-                fallbackSlot = slot
-            }
-
-            val minSteps = DeviceBinary.readRoutePokemonMinSteps(eeprom, slot).coerceAtLeast(0)
-            if (stepCount < minSteps) {
-                continue
-            }
-
-            val chance = DeviceBinary.readRoutePokemonChance(eeprom, slot).coerceIn(0, 100)
-            if (chance <= 0) {
-                continue
-            }
-
-            weighted += slot to chance
-        }
-
-        if (weighted.isEmpty()) {
-            return if (fallbackSlot >= 0) fallbackSlot else 0
-        }
-
-        val totalWeight = weighted.sumOf { it.second }.coerceAtLeast(1)
-        var roll = Random.nextInt(totalWeight)
-        for ((slot, weight) in weighted) {
-            roll -= weight
-            if (roll < 0) {
-                return slot
-            }
-        }
-
-        return weighted.last().first
-    }
-
-    private fun randomNextRadarSignalCursor(exclude: Int): Int {
-        val options = (0..3).filter { candidate -> candidate != exclude }
-        return if (options.isEmpty()) {
-            Random.nextInt(4)
-        } else {
-            options.random()
-        }
-    }
-
-    private fun radarCatchChancePercent(enemyHp: Int): Int {
-        return when (enemyHp.coerceIn(0, RADAR_MAX_HP)) {
-            4 -> 25
-            3 -> 45
-            2 -> 70
-            1 -> 90
-            else -> 98
-        }
+        return rollRadarSignalFromEeprom(currentEngine.exportEeprom())
     }
 
     private fun onRadarBattleAnimationFinished(state: DeviceInteractionState): DeviceInteractionState {
-        return when (state.radarBattleAnimation) {
-            RadarBattleAnimation.AttackHit,
-            RadarBattleAnimation.AttackCrit,
-                -> {
-                    if (state.radarBattlePendingCriticalMessage) {
-                        state.copy(
-                            radarBattleMessageOffset = RADAR_TEXT_CRITICAL_HIT,
-                            radarBattleMessageUsesEnemyName = false,
-                            radarBattlePendingCriticalMessage = false,
-                            radarBattleAnimation = RadarBattleAnimation.None,
-                            radarBattleAnimTicksRemaining = 0,
-                        )
-                    } else if (state.radarBattlePendingEnemyCounterAttack) {
-                        state.copy(
-                            radarBattleMessageOffset = RADAR_TEXT_ATTACKED,
-                            radarBattleMessageUsesEnemyName = true,
-                            radarBattlePendingEnemyCounterAttack = false,
-                            radarBattlePendingCriticalMessage = false,
-                            radarBattleAnimation = RadarBattleAnimation.EnemyAttack,
-                            radarBattleAnimTicksRemaining =
-                                radarBattleAnimationTicks(RadarBattleAnimation.EnemyAttack),
-                        )
-                    } else {
-                        state.copy(
-                            radarBattlePendingCriticalMessage = false,
-                            radarBattleAnimation = RadarBattleAnimation.None,
-                            radarBattleAnimTicksRemaining = 0,
-                        )
-                    }
-                }
-
-            RadarBattleAnimation.AttackEnemyEvade -> {
-                if (state.radarBattlePendingEnemyCounterAttack) {
-                    val nextPlayerHp = (state.radarPlayerHp - 1).coerceAtLeast(0)
-                    state.copy(
-                        radarPlayerHp = nextPlayerHp,
-                        radarBattleMessageOffset = RADAR_TEXT_EVADED,
-                        radarBattleReturnToMenu = false,
-                        radarBattleEnemyResponded = true,
-                        radarBattleMessageUsesEnemyName = false,
-                        radarBattlePendingEnemyCounterAttack = false,
-                        radarBattlePendingCriticalMessage = false,
-                        radarBattleAnimation = RadarBattleAnimation.EnemyAttack,
-                        radarBattleAnimTicksRemaining =
-                            radarBattleAnimationTicks(RadarBattleAnimation.EnemyAttack),
-                    )
-                } else {
-                    state.copy(
-                        radarBattleAnimation = RadarBattleAnimation.None,
-                        radarBattleAnimTicksRemaining = 0,
-                    )
-                }
-            }
-
-            RadarBattleAnimation.EnemyAttack -> {
-                if (state.radarPlayerHp <= 0) {
-                    state.copy(
-                        radarBattleMessageOffset = RADAR_TEXT_WAS_TOO_STRONG,
-                        radarBattleReturnToMenu = true,
-                        radarBattleEnemyResponded = false,
-                        radarBattleMessageUsesEnemyName = false,
-                        radarBattlePendingEnemyCounterAttack = false,
-                        radarBattlePendingCriticalMessage = false,
-                        radarBattleAnimation = RadarBattleAnimation.None,
-                        radarBattleAnimTicksRemaining = 0,
-                    )
-                } else {
-                    state.copy(
-                        radarBattlePendingCriticalMessage = false,
-                        radarBattleAnimation = RadarBattleAnimation.None,
-                        radarBattleAnimTicksRemaining = 0,
-                    )
-                }
-            }
-
-            RadarBattleAnimation.CatchThrow -> {
-                if (state.radarPendingCatchSuccess == true) {
-                    state.copy(
-                        radarBattleAnimation = RadarBattleAnimation.CatchWiggle,
-                        radarBattleAnimTicksRemaining =
-                            radarBattleAnimationTicks(RadarBattleAnimation.CatchWiggle),
-                    )
-                } else {
-                    state.copy(
-                        radarBattleMessageOffset = RADAR_TEXT_BLANK,
-                        radarBattleReturnToMenu = false,
-                        radarBattleEnemyResponded = false,
-                        radarBattleMessageUsesEnemyName = false,
-                        radarBattlePendingEnemyCounterAttack = false,
-                        radarBattlePendingCriticalMessage = false,
-                        radarPendingCatchSuccess = null,
-                        radarPendingCatchRouteSlot = null,
-                        radarBattleAnimation = RadarBattleAnimation.CatchFail,
-                        radarBattleAnimTicksRemaining =
-                            radarBattleAnimationTicks(RadarBattleAnimation.CatchFail),
-                    )
-                }
-            }
-
-            RadarBattleAnimation.CatchWiggle -> {
-                val overflowRouteSlot = state.radarPendingCatchRouteSlot
-                if (overflowRouteSlot != null) {
-                    state.copy(
-                        radarMode = RadarMode.BattleSwap,
-                        radarSwapCursor = 1,
-                        radarBattleMessageOffset = null,
-                        radarBattleReturnToMenu = false,
-                        radarBattleEnemyResponded = false,
-                        radarBattleMessageUsesEnemyName = false,
-                        radarBattlePendingEnemyCounterAttack = false,
-                        radarBattlePendingCriticalMessage = false,
-                        radarPendingCatchSuccess = null,
-                        radarBattleAnimation = RadarBattleAnimation.None,
-                        radarBattleAnimTicksRemaining = 0,
-                    )
-                } else {
-                    state.copy(
-                        radarBattleMessageOffset = RADAR_TEXT_CAUGHT,
-                        radarBattleReturnToMenu = true,
-                        radarBattleEnemyResponded = false,
-                        radarBattleMessageUsesEnemyName = false,
-                        radarBattlePendingEnemyCounterAttack = false,
-                        radarBattlePendingCriticalMessage = false,
-                        radarPendingCatchSuccess = null,
-                        radarPendingCatchRouteSlot = null,
-                        radarBattleAnimation = RadarBattleAnimation.CatchSuccess,
-                        radarBattleAnimTicksRemaining =
-                            radarBattleAnimationTicks(RadarBattleAnimation.CatchSuccess),
-                    )
-                }
-            }
-
-            RadarBattleAnimation.CatchSuccess,
-            RadarBattleAnimation.CatchFail,
-                -> {
-                    if (state.radarBattleAnimation == RadarBattleAnimation.CatchFail) {
-                        state.copy(
-                            radarBattleMessageOffset = RADAR_TEXT_FLED,
-                            radarBattleReturnToMenu = true,
-                            radarBattleEnemyResponded = false,
-                            radarBattleMessageUsesEnemyName = false,
-                            radarBattlePendingEnemyCounterAttack = false,
-                            radarBattlePendingCriticalMessage = false,
-                            radarPendingCatchRouteSlot = null,
-                            radarBattleAnimation = RadarBattleAnimation.None,
-                            radarBattleAnimTicksRemaining = 0,
-                        )
-                    } else {
-                        state.copy(
-                            radarBattleEnemyResponded = false,
-                            radarBattleMessageUsesEnemyName = false,
-                            radarBattlePendingEnemyCounterAttack = false,
-                            radarBattlePendingCriticalMessage = false,
-                            radarPendingCatchRouteSlot = null,
-                            radarBattleAnimation = RadarBattleAnimation.None,
-                            radarBattleAnimTicksRemaining = 0,
-                        )
-                    }
-                }
-
-            else -> {
-                state.copy(
-                    radarBattleAnimation = RadarBattleAnimation.None,
-                    radarBattleAnimTicksRemaining = 0,
-                )
-            }
-        }
+        return resolveRadarBattleAnimationFinished(
+            state = state,
+            messages =
+                RadarBattleMessageOffsets(
+                    criticalHit = RADAR_TEXT_CRITICAL_HIT,
+                    attacked = RADAR_TEXT_ATTACKED,
+                    evaded = RADAR_TEXT_EVADED,
+                    wasTooStrong = RADAR_TEXT_WAS_TOO_STRONG,
+                    blank = RADAR_TEXT_BLANK,
+                    caught = RADAR_TEXT_CAUGHT,
+                    fled = RADAR_TEXT_FLED,
+                ),
+            tickCountForAnimation = ::radarBattleAnimationTicks,
+        )
     }
 
     private fun radarBattleAnimationTicks(animation: RadarBattleAnimation): Int {
-        return when (animation) {
-            RadarBattleAnimation.None -> 0
-            RadarBattleAnimation.AttackTrade,
-            RadarBattleAnimation.EnemyAttack,
-            RadarBattleAnimation.EvadeCounter,
-            RadarBattleAnimation.EvadeStandoff,
-                -> RADAR_ANIM_TICKS_SHORT
-
-            RadarBattleAnimation.AttackHit,
-            RadarBattleAnimation.AttackCrit,
-            RadarBattleAnimation.EvadeEnemyFlee,
-            RadarBattleAnimation.AttackEnemyEvade,
-            RadarBattleAnimation.CatchThrow,
-            RadarBattleAnimation.CatchSuccess,
-                -> RADAR_ANIM_TICKS_MEDIUM
-
-            RadarBattleAnimation.CatchFail -> RADAR_ANIM_TICKS_LONG
-
-            RadarBattleAnimation.CatchWiggle -> RADAR_ANIM_TICKS_WIGGLE
-        }
+        return radarBattleAnimationTickCount(
+            animation = animation,
+            shortTicks = RADAR_ANIM_TICKS_SHORT,
+            mediumTicks = RADAR_ANIM_TICKS_MEDIUM,
+            wiggleTicks = RADAR_ANIM_TICKS_WIGGLE,
+            longTicks = RADAR_ANIM_TICKS_LONG,
+        )
     }
 
     private fun isRadarBattleAnimationActive(): Boolean {
@@ -2267,15 +1484,6 @@ class EmulatorViewModel(
                 radarOutcome = outcome,
             )
         refreshState(statusMessage)
-    }
-
-    private fun wrapIndex(
-        value: Int,
-        size: Int,
-    ): Int {
-        if (size <= 0) return 0
-        val mod = value % size
-        return if (mod < 0) mod + size else mod
     }
 
     private data class RequiredAssetsStatus(
