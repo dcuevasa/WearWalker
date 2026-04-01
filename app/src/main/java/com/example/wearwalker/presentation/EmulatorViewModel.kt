@@ -133,6 +133,7 @@ class EmulatorViewModel(
     private var interactionState = DeviceInteractionState()
     private var animationFrame = 0
     private var totalActions = 0
+    private val buttonSoundPlayer = DeviceButtonSoundPlayer()
     private val stepTrackingStore = StepTrackingStore(appContext)
     private val stepCounterMonitor =
         StepCounterMonitor(appContext) { sensorTotal ->
@@ -242,6 +243,13 @@ class EmulatorViewModel(
     fun onLeftAction() {
         totalActions += 1
 
+        val isAdjustingSound =
+            interactionState.screen == DeviceScreen.Settings &&
+                interactionState.settingsMode == DeviceSettingsMode.AdjustSound
+        if (!isAdjustingSound) {
+            playButtonSound(DeviceButtonSoundType.Left)
+        }
+
         if (interactionState.screen == DeviceScreen.Radar) {
             when (interactionState.radarMode) {
                 RadarMode.BattleMenu -> {
@@ -339,11 +347,25 @@ class EmulatorViewModel(
                 DeviceScreen.Settings ->
                     onLeftInSettings()
             }
+
+        if (interactionState.screen == DeviceScreen.Settings && interactionState.settingsMode == DeviceSettingsMode.AdjustSound) {
+            playButtonSound(
+                soundType = DeviceButtonSoundType.SettingAdjust,
+                overrideSoundLevel = interactionState.soundLevel,
+            )
+        }
         refreshState("LEFT action.")
     }
 
     fun onRightAction() {
         totalActions += 1
+
+        val isAdjustingSound =
+            interactionState.screen == DeviceScreen.Settings &&
+                interactionState.settingsMode == DeviceSettingsMode.AdjustSound
+        if (!isAdjustingSound) {
+            playButtonSound(DeviceButtonSoundType.Right)
+        }
 
         if (interactionState.screen == DeviceScreen.Radar) {
             when (interactionState.radarMode) {
@@ -425,11 +447,19 @@ class EmulatorViewModel(
                 DeviceScreen.Settings ->
                     onRightInSettings()
             }
+
+        if (interactionState.screen == DeviceScreen.Settings && interactionState.settingsMode == DeviceSettingsMode.AdjustSound) {
+            playButtonSound(
+                soundType = DeviceButtonSoundType.SettingAdjust,
+                overrideSoundLevel = interactionState.soundLevel,
+            )
+        }
         refreshState("RIGHT action.")
     }
 
     fun onEnterAction() {
         totalActions += 1
+        playButtonSound(DeviceButtonSoundType.Enter)
         when (interactionState.screen) {
             DeviceScreen.Home -> {
                 if (!ensureRequiredAssets()) {
@@ -1747,9 +1777,20 @@ class EmulatorViewModel(
     }
 
     override fun onCleared() {
+        buttonSoundPlayer.release()
         sensorFlushJob?.cancel()
         stepCounterMonitor.stop()
         super.onCleared()
+    }
+
+    private fun playButtonSound(
+        soundType: DeviceButtonSoundType,
+        overrideSoundLevel: Int? = null,
+    ) {
+        buttonSoundPlayer.play(
+            soundLevel = (overrideSoundLevel ?: interactionState.soundLevel),
+            soundType = soundType,
+        )
     }
 
     private data class RequiredAssetsStatus(
