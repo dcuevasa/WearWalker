@@ -5,7 +5,7 @@
     <string name="status_error">Error</string>
     <string name="steps_label">Steps</string>
     <string name="watts_label">Watts</string>
-    <string name="trainer_label">Trainer</string>
+    <string name="owner_label">Owner</string>
     <string name="flags_label">Flags</string>
     <string name="mirror_label">Mirror</string>
     <string name="btn_add_steps">Add 100 steps</string>
@@ -21,7 +21,7 @@
     <string name="btn_open_debug_settings">Debug / Settings</string>
     <string name="btn_settings_gear">⚙</string>
     <string name="btn_back_to_emulator">Back to emulator</string>
-    <string name="required_assets_missing_short">Copy eeprom.bin to /data/data/com.example.wearwalker/files/</string>
+    <string name="required_assets_missing_short">Copy eeprom.bin to /data/data/com.wearwalker.wearwalker/files/</string>
     <string name="mirror_in_sync">in sync</string>
     <string name="mirror_out_of_sync">out of sync</string>
 </resources>

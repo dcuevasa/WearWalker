@@ -5,13 +5,13 @@ plugins {
 }
 
 android {
-    namespace = "com.example.wearwalker"
+    namespace = "com.wearwalker.wearwalker"
     compileSdk {
         version = release(36)
     }
 
     defaultConfig {
-        applicationId = "com.example.wearwalker"
+        applicationId = "com.wearwalker.wearwalker"
         minSdk = 30
         targetSdk = 36
         versionCode = 1
