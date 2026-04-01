@@ -1,5 +1,6 @@
 package com.example.wearwalker.presentation
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -24,6 +25,8 @@ import com.example.wearwalker.data.EepromLoadSource
 import com.example.wearwalker.data.EepromStorage
 import com.example.wearwalker.data.EepromValidationReport
 import com.example.wearwalker.data.EepromValidator
+import com.example.wearwalker.data.StepTrackingStore
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -32,8 +35,13 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.temporal.ChronoUnit
 import kotlin.math.abs
 import kotlin.random.Random
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 enum class EmulatorPhase {
     Loading,
@@ -53,19 +61,21 @@ data class EmulatorUiState(
     val eepromSizeBytes: Long = 0,
     val eepromUserProvided: Boolean = false,
     val requiredAssetsReady: Boolean = false,
-    val requiredAssetsMessage: String = "Copy eeprom.bin manually to /data/data/com.example.wearwalker/files/.",
+    val requiredAssetsMessage: String = "Copy eeprom.bin manually to one of the supported app folders.",
     val importHint: String = "",
     val lcdPreviewPixels: IntArray = IntArray(0),
     val lcdSceneLabel: String = DeviceScreen.Home.label,
     val lcdHasVisualContent: Boolean = false,
     val selectedMenuLabel: String = DeviceMenuItem.Radar.label,
     val actionHint: String = "Use LEFT/RIGHT/ENTER actions to play.",
+    val pedometerStatus: String = "Pedometer paused: waiting for permission.",
     val caughtPokemonCount: Int = 0,
     val foundItemCount: Int = 0,
     val totalActions: Int = 0,
 )
 
 class EmulatorViewModel(
+    private val appContext: Context,
     private val eepromStorage: EepromStorage,
 ) : ViewModel() {
     companion object {
@@ -113,7 +123,6 @@ class EmulatorViewModel(
         private const val RADAR_SIGNAL_MIN_TICKS = 3
         private const val RADAR_SIGNAL_MAX_TICKS = 5
 
-        private const val MANUAL_FILES_DIRECTORY = "/data/data/com.example.wearwalker/files/"
     }
 
     private val _uiState = MutableStateFlow(EmulatorUiState())
@@ -124,6 +133,15 @@ class EmulatorViewModel(
     private var interactionState = DeviceInteractionState()
     private var animationFrame = 0
     private var totalActions = 0
+    private val stepTrackingStore = StepTrackingStore(appContext)
+    private val stepCounterMonitor =
+        StepCounterMonitor(appContext) { sensorTotal ->
+            onStepCounterSample(sensorTotal)
+        }
+    private val sensorMutex = Mutex()
+    private var sensorFlushJob: Job? = null
+    private var activityRecognitionGranted = false
+    private var pedometerStatus = "Pedometer paused: waiting for permission."
 
     init {
         loadFromStorage()
@@ -154,7 +172,12 @@ class EmulatorViewModel(
                 val eepromStatus =
                     when (eepromLoaded.source) {
                         EepromLoadSource.Existing -> {
-                            eepromSource = "Stored local EEPROM"
+                            eepromSource =
+                                if (eepromLoaded.detail.contains("external path", ignoreCase = true)) {
+                                    "Imported external EEPROM"
+                                } else {
+                                    "Stored local EEPROM"
+                                }
                             eepromLoaded.detail
                         }
                         EepromLoadSource.CreatedBlank -> {
@@ -168,6 +191,10 @@ class EmulatorViewModel(
                     }
 
                 refreshState(eepromStatus)
+                reconcilePedometerStateAfterLoad()
+                if (activityRecognitionGranted) {
+                    startStepCounterIfPossible()
+                }
             }.onFailure { error ->
                 _uiState.update {
                     it.copy(
@@ -181,6 +208,35 @@ class EmulatorViewModel(
 
     fun refreshStorageStatus() {
         loadFromStorage()
+    }
+
+    fun onActivityRecognitionPermissionChanged(granted: Boolean) {
+        val changed = activityRecognitionGranted != granted
+        activityRecognitionGranted = granted
+
+        if (!granted) {
+            stepCounterMonitor.stop()
+            pedometerStatus = "Pedometer paused: activity permission denied."
+            if (changed && engine != null) {
+                refreshState("Activity recognition permission is required for real pedometer sync.")
+            }
+            return
+        }
+
+        startStepCounterIfPossible()
+        if (changed && engine != null) {
+            refreshState("Pedometer tracking enabled (best-effort).")
+        }
+    }
+
+    fun onHostResumed() {
+        if (activityRecognitionGranted) {
+            startStepCounterIfPossible()
+        }
+
+        viewModelScope.launch {
+            flushPendingStepDeltaIfNeeded("Resumed and synced pending pedometer steps.")
+        }
     }
 
     fun onLeftAction() {
@@ -477,9 +533,8 @@ class EmulatorViewModel(
     fun addSteps(delta: Int = 100) {
         viewModelScope.launch {
             val currentEngine = engine ?: return@launch
-            currentEngine.addSteps(delta)
-            currentEngine.setLastSyncNow(Instant.now().epochSecond)
-            persistAndRefresh("Added $delta steps.")
+            val message = applyStepDeltaAndPersist(currentEngine, delta, "Added $delta steps.")
+            refreshState(message)
         }
     }
 
@@ -494,6 +549,7 @@ class EmulatorViewModel(
 
     fun saveNow() {
         viewModelScope.launch {
+            flushPendingStepDeltaIfNeeded("Synced pending pedometer steps before save.")
             persistAndRefresh("EEPROM saved.")
         }
     }
@@ -502,6 +558,192 @@ class EmulatorViewModel(
         val currentEngine = engine ?: return
         eepromStorage.save(currentEngine.exportEeprom())
         refreshState(message)
+    }
+
+    private fun onStepCounterSample(sensorTotal: Long) {
+        if (!activityRecognitionGranted) {
+            return
+        }
+
+        viewModelScope.launch {
+            sensorMutex.withLock {
+                val normalizedTotal = sensorTotal.coerceAtLeast(0L)
+                val lastTotal = stepTrackingStore.readLastSensorTotal()
+
+                if (lastTotal == null) {
+                    stepTrackingStore.writeLastSensorTotal(normalizedTotal)
+                    pedometerStatus = "Pedometer baseline captured."
+                    return@withLock
+                }
+
+                val deltaLong =
+                    if (normalizedTotal >= lastTotal) {
+                        normalizedTotal - lastTotal
+                    } else {
+                        // Device reboot/resets can restart TYPE_STEP_COUNTER.
+                        normalizedTotal
+                    }
+
+                stepTrackingStore.writeLastSensorTotal(normalizedTotal)
+
+                if (deltaLong <= 0L) {
+                    return@withLock
+                }
+
+                val delta = deltaLong.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+                val pending = stepTrackingStore.addPendingStepDelta(delta)
+                pedometerStatus = "Pedometer active (best-effort). Pending steps: $pending."
+
+                if (sensorFlushJob?.isActive != true) {
+                    sensorFlushJob =
+                        viewModelScope.launch {
+                            delay(1200)
+                            flushPendingStepDeltaIfNeeded("Pedometer sync applied.")
+                        }
+                }
+            }
+        }
+    }
+
+    private fun startStepCounterIfPossible() {
+        if (!activityRecognitionGranted) {
+            pedometerStatus = "Pedometer paused: waiting for activity permission."
+            return
+        }
+
+        if (!stepCounterMonitor.isAvailable) {
+            pedometerStatus = "Pedometer unavailable: step counter sensor not found."
+            return
+        }
+
+        stepCounterMonitor.start()
+        pedometerStatus =
+            if (stepCounterMonitor.isListening) {
+                "Pedometer active (best-effort)."
+            } else {
+                "Pedometer unavailable: failed to start sensor listener."
+            }
+    }
+
+    private suspend fun reconcilePedometerStateAfterLoad() {
+        val currentEngine = engine ?: return
+
+        if (stepTrackingStore.readLastRolloverDate() == null) {
+            stepTrackingStore.writeLastRolloverDate(LocalDate.now(ZoneId.systemDefault()))
+        }
+
+        if (flushPendingStepDeltaIfNeeded("Recovered pending pedometer steps.")) {
+            return
+        }
+
+        val rolledDays = applyDailyRolloverIfNeeded(currentEngine)
+        if (rolledDays > 0) {
+            currentEngine.setLastSyncNow(Instant.now().epochSecond)
+            eepromStorage.save(currentEngine.exportEeprom())
+            refreshState("Applied $rolledDays daily rollover(s) at local midnight.")
+        }
+    }
+
+    private suspend fun flushPendingStepDeltaIfNeeded(successMessage: String): Boolean {
+        val pending =
+            sensorMutex.withLock {
+                stepTrackingStore.consumePendingStepDelta()
+            }
+        if (pending <= 0) {
+            return false
+        }
+
+        val currentEngine = engine
+        if (currentEngine == null) {
+            sensorMutex.withLock {
+                stepTrackingStore.restorePendingStepDelta(pending)
+            }
+            return false
+        }
+
+        return runCatching {
+            val message = applyStepDeltaAndPersist(currentEngine, pending, successMessage)
+            pedometerStatus = "Pedometer active (best-effort). Last sync +$pending steps."
+            refreshState(message)
+            true
+        }.getOrElse { error ->
+            sensorMutex.withLock {
+                stepTrackingStore.restorePendingStepDelta(pending)
+            }
+            val reason = error.message ?: "unknown error"
+            pedometerStatus = "Pedometer sync failed: $reason"
+            if (engine != null) {
+                refreshState("Pedometer sync failed: $reason")
+            }
+            false
+        }
+    }
+
+    private suspend fun applyStepDeltaAndPersist(
+        currentEngine: DeviceEngine,
+        delta: Int,
+        statusPrefix: String,
+    ): String {
+        if (delta <= 0) {
+            return statusPrefix
+        }
+
+        val rolloverDays = applyDailyRolloverIfNeeded(currentEngine)
+        val mutation =
+            currentEngine.applyStepDelta(
+                delta = delta,
+                wattRemainder = stepTrackingStore.readWattRemainder(),
+            )
+
+        stepTrackingStore.writeWattRemainder(mutation.wattRemainder)
+        stepTrackingStore.addDeferredExpSteps(mutation.deferredExpSteps)
+
+        currentEngine.setLastSyncNow(Instant.now().epochSecond)
+        eepromStorage.save(currentEngine.exportEeprom())
+
+        val wattsMessage =
+            if (mutation.generatedWatts > 0) {
+                " +${mutation.generatedWatts}W"
+            } else {
+                ""
+            }
+        val friendshipMessage =
+            if (mutation.friendshipGain > 0) {
+                " Friendship +${mutation.friendshipGain}"
+            } else {
+                ""
+            }
+        val rolloverMessage =
+            if (rolloverDays > 0) {
+                " Rollover +$rolloverDays day(s)."
+            } else {
+                "."
+            }
+        return "$statusPrefix$wattsMessage$friendshipMessage$rolloverMessage"
+    }
+
+    private fun applyDailyRolloverIfNeeded(currentEngine: DeviceEngine): Int {
+        val today = LocalDate.now(ZoneId.systemDefault())
+        val lastRolloverDate = stepTrackingStore.readLastRolloverDate()
+
+        if (lastRolloverDate == null) {
+            stepTrackingStore.writeLastRolloverDate(today)
+            return 0
+        }
+
+        if (today.isBefore(lastRolloverDate)) {
+            stepTrackingStore.writeLastRolloverDate(today)
+            return 0
+        }
+
+        val elapsedDays = ChronoUnit.DAYS.between(lastRolloverDate, today).toInt().coerceAtLeast(0)
+        if (elapsedDays <= 0) {
+            return 0
+        }
+
+        val rolloverResult = currentEngine.applyDailyRollover(elapsedDays)
+        stepTrackingStore.writeLastRolloverDate(today)
+        return rolloverResult.rolledDays
     }
 
     private fun onEnterFromMenu() {
@@ -1155,7 +1397,9 @@ class EmulatorViewModel(
                 animationFrame = animationFrame,
             )
 
-        val importHint = "Manual folder: $MANUAL_FILES_DIRECTORY (copy eeprom.bin)"
+        val manualPaths = eepromStorage.getManualEepromPaths()
+        val manualPathsHint = manualPaths.joinToString(" | ")
+        val importHint = "Manual paths: $manualPathsHint"
 
         val message = statusMessage ?: _uiState.value.statusMessage
         val selectedMenu = interactionState.selectedMenuItem().label
@@ -1184,6 +1428,7 @@ class EmulatorViewModel(
                         hasWalkingPokemon = hasWalkingPokemon(),
                         radarAnimationActive = isRadarBattleAnimationActive(),
                     ),
+                pedometerStatus = pedometerStatus,
                 caughtPokemonCount = caughtCount,
                 foundItemCount = foundItemsCount,
                 totalActions = totalActions,
@@ -1211,11 +1456,12 @@ class EmulatorViewModel(
         validation: EepromValidationReport,
         eepromInfo: EepromFileInfo,
     ): RequiredAssetsStatus {
+        val manualPathsHint = eepromStorage.getManualEepromPaths().joinToString(" | ")
         val (ready, message) =
             computeRequiredAssetsStatus(
                 validation = validation,
                 eepromInfo = eepromInfo,
-                manualDirectory = MANUAL_FILES_DIRECTORY,
+                manualDirectory = manualPathsHint,
                 expectedSizeBytes = DeviceOffsets.EEPROM_SIZE,
             )
         return RequiredAssetsStatus(
@@ -1500,12 +1746,19 @@ class EmulatorViewModel(
         refreshState(statusMessage)
     }
 
+    override fun onCleared() {
+        sensorFlushJob?.cancel()
+        stepCounterMonitor.stop()
+        super.onCleared()
+    }
+
     private data class RequiredAssetsStatus(
         val ready: Boolean,
         val message: String,
     )
 
     class Factory(
+        private val appContext: Context,
         private val eepromStorage: EepromStorage,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
@@ -1513,7 +1766,7 @@ class EmulatorViewModel(
             require(modelClass.isAssignableFrom(EmulatorViewModel::class.java)) {
                 "Unknown ViewModel class: ${modelClass.name}"
             }
-            return EmulatorViewModel(eepromStorage) as T
+            return EmulatorViewModel(appContext, eepromStorage) as T
         }
     }
 }

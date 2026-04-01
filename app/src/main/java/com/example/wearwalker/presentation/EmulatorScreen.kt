@@ -1,5 +1,6 @@
 package com.example.wearwalker.presentation
 
+import android.content.pm.ApplicationInfo
 import android.graphics.Bitmap
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
@@ -26,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.wear.compose.foundation.lazy.ScalingLazyColumn
@@ -51,9 +53,11 @@ fun EmulatorScreen(
     onEnterAction: () -> Unit,
     onRightAction: () -> Unit,
 ) {
+    val debugControlsEnabled =
+        (LocalContext.current.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
     var showDebugView by rememberSaveable { mutableStateOf(false) }
 
-    if (showDebugView) {
+    if (debugControlsEnabled && showDebugView) {
         EmulatorDebugScreen(
             uiState = uiState,
             onAddSteps = onAddSteps,
@@ -70,6 +74,7 @@ fun EmulatorScreen(
         onLeftAction = onLeftAction,
         onEnterAction = onEnterAction,
         onRightAction = onRightAction,
+        showDebugButton = debugControlsEnabled,
         onOpenDebug = { showDebugView = true },
     )
 }
@@ -80,6 +85,7 @@ private fun EmulatorMainScreen(
     onLeftAction: () -> Unit,
     onEnterAction: () -> Unit,
     onRightAction: () -> Unit,
+    showDebugButton: Boolean,
     onOpenDebug: () -> Unit,
 ) {
     Box(
@@ -121,15 +127,17 @@ private fun EmulatorMainScreen(
                     ActionButton(label = stringResource(R.string.btn_right_short), onClick = onRightAction)
                 }
 
-                Button(
-                    modifier =
-                        Modifier
-                            .align(Alignment.CenterEnd)
-                            .size(30.dp),
-                    onClick = onOpenDebug,
-                    colors = ButtonDefaults.secondaryButtonColors(),
-                ) {
-                    Text(text = stringResource(R.string.btn_settings_gear))
+                if (showDebugButton) {
+                    Button(
+                        modifier =
+                            Modifier
+                                .align(Alignment.CenterEnd)
+                                .size(30.dp),
+                        onClick = onOpenDebug,
+                        colors = ButtonDefaults.secondaryButtonColors(),
+                    ) {
+                        Text(text = stringResource(R.string.btn_settings_gear))
+                    }
                 }
             }
 
@@ -182,6 +190,7 @@ private fun EmulatorDebugScreen(
         add("Screen: ${uiState.lcdSceneLabel}")
         add("Menu selection: ${uiState.selectedMenuLabel}")
         add("Action hint: ${uiState.actionHint}")
+        add("Pedometer: ${uiState.pedometerStatus}")
         add("Total actions: ${uiState.totalActions}")
         add(
             if (uiState.lcdHasVisualContent) {

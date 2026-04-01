@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.wearwalker.core.DeviceOffsets
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.io.FileNotFoundException
 
 enum class EepromLoadSource {
@@ -34,19 +35,42 @@ class EepromStorage(
         private const val EEPROM_IMPORTED_MARKER_FILE = "eeprom_user_provided.flag"
     }
 
+    private data class ExternalImportResult(
+        val eeprom: ByteArray,
+        val path: String,
+        val detail: String,
+    )
+
     suspend fun loadOrCreate(): EepromLoadResult = withContext(Dispatchers.IO) {
+        val hasUserProvidedMarker = importedMarkerExists()
         val existing = runCatching {
             context.openFileInput(EEPROM_FILE_NAME).use { it.readBytes() }
         }
 
         if (existing.isSuccess) {
+            if (!hasUserProvidedMarker) {
+                val externalImport = tryLoadFromExternalPaths()
+                if (externalImport != null) {
+                    writeInternal(externalImport.eeprom)
+                    writeImportedMarker()
+                    return@withContext EepromLoadResult(
+                        eeprom = externalImport.eeprom,
+                        source = EepromLoadSource.Existing,
+                        detail =
+                            "Imported EEPROM from external path and replaced local fallback file: " +
+                                externalImport.path,
+                        userProvided = true,
+                    )
+                }
+            }
+
             val bytes = existing.getOrThrow()
             if (bytes.size == DeviceOffsets.EEPROM_SIZE) {
                 return@withContext EepromLoadResult(
                     eeprom = bytes,
                     source = EepromLoadSource.Existing,
                     detail = "Loaded existing EEPROM from app storage.",
-                    userProvided = importedMarkerExists(),
+                    userProvided = hasUserProvidedMarker,
                 )
             }
 
@@ -59,7 +83,19 @@ class EepromStorage(
                     detail =
                         "Loaded EEPROM by extracting ${DeviceOffsets.EEPROM_SIZE} bytes " +
                             "from a ${bytes.size}-byte file.",
-                    userProvided = importedMarkerExists(),
+                    userProvided = hasUserProvidedMarker,
+                )
+            }
+
+            val externalImport = tryLoadFromExternalPaths()
+            if (externalImport != null) {
+                writeInternal(externalImport.eeprom)
+                writeImportedMarker()
+                return@withContext EepromLoadResult(
+                    eeprom = externalImport.eeprom,
+                    source = EepromLoadSource.Existing,
+                    detail = externalImport.detail,
+                    userProvided = true,
                 )
             }
 
@@ -71,8 +107,21 @@ class EepromStorage(
                 source = EepromLoadSource.RecreatedFromInvalid,
                 detail =
                     "Stored EEPROM had invalid size (${bytes.size}). " +
-                        "Recreated blank EEPROM (${DeviceOffsets.EEPROM_SIZE} bytes).",
+                        "Recreated blank EEPROM (${DeviceOffsets.EEPROM_SIZE} bytes). " +
+                        "Checked external paths too.",
                 userProvided = false,
+            )
+        }
+
+        val externalImport = tryLoadFromExternalPaths()
+        if (externalImport != null) {
+            writeInternal(externalImport.eeprom)
+            writeImportedMarker()
+            return@withContext EepromLoadResult(
+                eeprom = externalImport.eeprom,
+                source = EepromLoadSource.Existing,
+                detail = externalImport.detail,
+                userProvided = true,
             )
         }
 
@@ -81,7 +130,8 @@ class EepromStorage(
         clearImportedMarker()
         val reason =
             when (existing.exceptionOrNull()) {
-                is FileNotFoundException -> "No stored EEPROM found. Created blank EEPROM."
+                is FileNotFoundException ->
+                    "No stored EEPROM found in app storage or external fallback paths. Created blank EEPROM."
                 else ->
                     "EEPROM could not be loaded (${existing.exceptionOrNull()?.message}). " +
                         "Created blank EEPROM."
@@ -113,13 +163,31 @@ class EepromStorage(
     fun getFileInfo(): EepromFileInfo {
         val file = context.getFileStreamPath(EEPROM_FILE_NAME)
         val exists = file.exists()
-        val manualFilePath = "/data/data/${context.packageName}/files/$EEPROM_FILE_NAME"
+        val manualFilePath = internalEepromPath()
         return EepromFileInfo(
             absolutePath = manualFilePath,
             exists = exists,
             sizeBytes = if (exists) file.length() else 0L,
             userProvided = importedMarkerExists(),
         )
+    }
+
+    fun getManualEepromPaths(): List<String> {
+        val packageName = context.packageName
+        val internalPath = internalEepromPath()
+        val primaryExternalPath = "/storage/self/primary/Android/data/$packageName/files/$EEPROM_FILE_NAME"
+        val emulatedExternalPath = "/storage/emulated/0/Android/data/$packageName/files/$EEPROM_FILE_NAME"
+        val sdcardExternalPath = "/sdcard/Android/data/$packageName/files/$EEPROM_FILE_NAME"
+        val contextExternalPath =
+            context.getExternalFilesDir(null)?.resolve(EEPROM_FILE_NAME)?.absolutePath
+
+        return listOfNotNull(
+            internalPath,
+            primaryExternalPath,
+            emulatedExternalPath,
+            sdcardExternalPath,
+            contextExternalPath,
+        ).distinct()
     }
 
     private fun extractEepromWindow(bytes: ByteArray): ByteArray? {
@@ -154,6 +222,46 @@ class EepromStorage(
 
     private fun importedMarkerExists(): Boolean {
         return context.getFileStreamPath(EEPROM_IMPORTED_MARKER_FILE).exists()
+    }
+
+    private fun internalEepromPath(): String {
+        return "/data/data/${context.packageName}/files/$EEPROM_FILE_NAME"
+    }
+
+    private fun tryLoadFromExternalPaths(): ExternalImportResult? {
+        val internalPath = internalEepromPath()
+        for (candidatePath in getManualEepromPaths()) {
+            if (candidatePath == internalPath) {
+                continue
+            }
+
+            val candidate = File(candidatePath)
+            if (!candidate.exists() || !candidate.isFile) {
+                continue
+            }
+
+            val bytes = runCatching { candidate.readBytes() }.getOrNull() ?: continue
+            if (bytes.size == DeviceOffsets.EEPROM_SIZE) {
+                return ExternalImportResult(
+                    eeprom = bytes,
+                    path = candidatePath,
+                    detail = "Loaded EEPROM from external path: $candidatePath",
+                )
+            }
+
+            val extracted = extractEepromWindow(bytes)
+            if (extracted != null) {
+                return ExternalImportResult(
+                    eeprom = extracted,
+                    path = candidatePath,
+                    detail =
+                        "Loaded EEPROM by extracting ${DeviceOffsets.EEPROM_SIZE} bytes " +
+                            "from external path $candidatePath (${bytes.size} bytes).",
+                )
+            }
+        }
+
+        return null
     }
 
     private fun writeImportedMarker() {

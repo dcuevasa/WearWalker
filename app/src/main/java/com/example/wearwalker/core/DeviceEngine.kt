@@ -12,6 +12,20 @@ data class DeviceSnapshot(
     val mirrorInSync: Boolean,
 )
 
+data class StepMutationResult(
+    val steps: Int,
+    val watts: Int,
+    val generatedWatts: Int,
+    val wattRemainder: Int,
+    val friendshipGain: Int,
+    val deferredExpSteps: Int,
+)
+
+data class DailyRolloverResult(
+    val rolledDays: Int,
+    val totalDays: Int,
+)
+
 class DeviceEngine(initialEeprom: ByteArray) {
     private var eeprom: ByteArray = initialEeprom.copyOf()
 
@@ -76,6 +90,102 @@ class DeviceEngine(initialEeprom: ByteArray) {
 
         syncGeneralDataMirror()
         return next.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+    }
+
+    fun applyStepDelta(
+        delta: Int,
+        wattRemainder: Int,
+    ): StepMutationResult {
+        val normalizedRemainder = wattRemainder.coerceIn(0, 19)
+        if (delta <= 0) {
+            return StepMutationResult(
+                steps = currentSteps(),
+                watts = currentWatts(),
+                generatedWatts = 0,
+                wattRemainder = normalizedRemainder,
+                friendshipGain = 0,
+                deferredExpSteps = 0,
+            )
+        }
+
+        val boundedDelta = delta.coerceAtLeast(0)
+
+        val currentIdentitySteps =
+            DeviceBinary.readU32BE(eeprom, DeviceOffsets.IDENTITY_STEP_COUNT_OFFSET)
+                .coerceAtMost(0xFFFF_FFFFL)
+                .toInt()
+        val nextIdentitySteps =
+            (currentIdentitySteps.toLong() + boundedDelta.toLong())
+                .coerceAtMost(0xFFFF_FFFFL)
+                .toInt()
+        DeviceBinary.writeU32BE(
+            data = eeprom,
+            offset = DeviceOffsets.IDENTITY_STEP_COUNT_OFFSET,
+            value = nextIdentitySteps.toLong(),
+        )
+
+        val currentTodaySteps = DeviceBinary.readHealthTodaySteps(eeprom)
+        val nextTodaySteps =
+            (currentTodaySteps.toLong() + boundedDelta.toLong())
+                .coerceAtMost(0xFFFF_FFFFL)
+                .toInt()
+        DeviceBinary.writeHealthTodaySteps(eeprom, nextTodaySteps)
+
+        val currentLifetimeSteps = DeviceBinary.readHealthLifetimeSteps(eeprom)
+        val nextLifetimeSteps =
+            (currentLifetimeSteps.toLong() + boundedDelta.toLong())
+                .coerceAtMost(0xFFFF_FFFFL)
+                .toInt()
+        DeviceBinary.writeHealthLifetimeSteps(eeprom, nextLifetimeSteps)
+
+        val convertibleSteps = normalizedRemainder + boundedDelta
+        val generatedWatts = convertibleSteps / 20
+        val nextRemainder = convertibleSteps % 20
+        if (generatedWatts > 0) {
+            val nextWatts = (currentWatts() + generatedWatts).coerceAtMost(0xFFFF)
+            DeviceBinary.writeCurrentWatts(eeprom, nextWatts)
+        }
+
+        val friendshipGain = incrementWalkingPokemonFriendship(boundedDelta)
+        syncGeneralDataMirror()
+
+        return StepMutationResult(
+            steps = nextTodaySteps,
+            watts = currentWatts(),
+            generatedWatts = generatedWatts,
+            wattRemainder = nextRemainder,
+            friendshipGain = friendshipGain,
+            deferredExpSteps = boundedDelta,
+        )
+    }
+
+    fun applyDailyRollover(daysElapsed: Int): DailyRolloverResult {
+        if (daysElapsed <= 0) {
+            return DailyRolloverResult(
+                rolledDays = 0,
+                totalDays = DeviceBinary.readHealthTotalDays(eeprom),
+            )
+        }
+
+        val boundedDays = daysElapsed.coerceAtMost(365)
+        repeat(boundedDays) {
+            val todaySteps = DeviceBinary.readHealthTodaySteps(eeprom)
+            for (day in DeviceOffsets.STEP_HISTORY_DAYS - 1 downTo 1) {
+                val previousSteps = DeviceBinary.readStepHistoryForDay(eeprom, day - 1)
+                DeviceBinary.writeStepHistoryForDay(eeprom, day, previousSteps)
+            }
+            DeviceBinary.writeStepHistoryForDay(eeprom, 0, todaySteps)
+            DeviceBinary.writeHealthTodaySteps(eeprom, 0)
+
+            val totalDays = (DeviceBinary.readHealthTotalDays(eeprom) + 1).coerceAtMost(0xFFFF)
+            DeviceBinary.writeHealthTotalDays(eeprom, totalDays)
+        }
+
+        syncGeneralDataMirror()
+        return DailyRolloverResult(
+            rolledDays = boundedDays,
+            totalDays = DeviceBinary.readHealthTotalDays(eeprom),
+        )
     }
 
     fun addWatts(delta: Int): Int {
@@ -168,6 +278,22 @@ class DeviceEngine(initialEeprom: ByteArray) {
 
     private fun currentWatts(): Int {
         return DeviceBinary.readCurrentWatts(eeprom)
+    }
+
+    private fun incrementWalkingPokemonFriendship(delta: Int): Int {
+        if (delta <= 0) {
+            return 0
+        }
+
+        val hasWalkingPokemon = DeviceBinary.readWalkingPokemonSpecies(eeprom) != 0
+        if (!hasWalkingPokemon) {
+            return 0
+        }
+
+        val currentFriendship = DeviceBinary.readWalkingPokemonFriendship(eeprom)
+        val nextFriendship = (currentFriendship + delta).coerceIn(0, 0xFF)
+        DeviceBinary.writeWalkingPokemonFriendship(eeprom, nextFriendship)
+        return nextFriendship - currentFriendship
     }
 
     private fun syncGeneralDataMirror() {

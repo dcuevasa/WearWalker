@@ -132,6 +132,29 @@ object DeviceBinary {
         return readU16BE(eeprom, DeviceOffsets.HEALTH_TOTAL_DAYS_OFFSET)
     }
 
+    fun writeHealthTodaySteps(
+        eeprom: ByteArray,
+        steps: Int,
+    ) {
+        val clamped = steps.coerceAtLeast(0).toLong().coerceAtMost(0xFFFF_FFFFL)
+        writeU32BE(eeprom, DeviceOffsets.HEALTH_TODAY_STEPS_OFFSET, clamped)
+    }
+
+    fun writeHealthLifetimeSteps(
+        eeprom: ByteArray,
+        steps: Int,
+    ) {
+        val clamped = steps.coerceAtLeast(0).toLong().coerceAtMost(0xFFFF_FFFFL)
+        writeU32BE(eeprom, DeviceOffsets.HEALTH_LIFETIME_STEPS_OFFSET, clamped)
+    }
+
+    fun writeHealthTotalDays(
+        eeprom: ByteArray,
+        days: Int,
+    ) {
+        writeU16BE(eeprom, DeviceOffsets.HEALTH_TOTAL_DAYS_OFFSET, days.coerceIn(0, 0xFFFF))
+    }
+
     fun countCaughtPokemon(eeprom: ByteArray): Int {
         var count = 0
         for (slot in 0 until DeviceOffsets.POKEMON_SLOT_COUNT) {
@@ -287,6 +310,38 @@ object DeviceBinary {
         if (dayIndex !in 0 until DeviceOffsets.STEP_HISTORY_DAYS) return 0
         val offset = DeviceOffsets.STEP_HISTORY_OFFSET + dayIndex * 4
         return readU32BE(eeprom, offset).coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
+    }
+
+    fun writeStepHistoryForDay(
+        eeprom: ByteArray,
+        dayIndex: Int,
+        steps: Int,
+    ) {
+        if (dayIndex !in 0 until DeviceOffsets.STEP_HISTORY_DAYS) return
+        val offset = DeviceOffsets.STEP_HISTORY_OFFSET + dayIndex * 4
+        writeU32BE(eeprom, offset, steps.coerceAtLeast(0).toLong().coerceAtMost(0xFFFF_FFFFL))
+    }
+
+    fun readWalkingPokemonFriendship(eeprom: ByteArray): Int {
+        return readUnsignedByte(eeprom, DeviceOffsets.ROUTE_FRIENDSHIP_OFFSET)
+    }
+
+    fun writeWalkingPokemonFriendship(
+        eeprom: ByteArray,
+        friendship: Int,
+    ) {
+        writeUnsignedByte(eeprom, DeviceOffsets.ROUTE_FRIENDSHIP_OFFSET, friendship)
+    }
+
+    fun writeUnsignedByte(
+        data: ByteArray,
+        offset: Int,
+        value: Int,
+    ) {
+        if (offset !in data.indices) {
+            return
+        }
+        data[offset] = (value and 0xFF).toByte()
     }
 
     fun stepHistoryCount(eeprom: ByteArray): Int {
