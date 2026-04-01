@@ -136,6 +136,21 @@ class DeviceEngine(initialEeprom: ByteArray) {
         return recorded
     }
 
+    fun hasFreeDowsedItemSlot(): Boolean {
+        return DeviceBinary.hasFreeDowsedItemSlot(eeprom)
+    }
+
+    fun replaceDowsedItemWithRoute(
+        dowsedSlot: Int,
+        routeItemIndex: Int,
+    ): Boolean {
+        val replaced = DeviceBinary.replaceDowsedItemWithRoute(eeprom, dowsedSlot, routeItemIndex)
+        if (replaced) {
+            syncGeneralDataMirror()
+        }
+        return replaced
+    }
+
     fun setLastSyncNow(epochSeconds: Long) {
         DeviceBinary.writeU32BE(
             data = eeprom,

@@ -79,7 +79,6 @@ class EmulatorViewModel(
 
         private const val RADAR_ATTACK_ENEMY_EVADE_CHANCE = 30
         private const val RADAR_ATTACK_CRIT_CHANCE = 20
-        private const val RADAR_ATTACK_ENEMY_HIT_CHANCE = 75
 
         private const val RADAR_EVADE_COUNTER_CHANCE = 55
         private const val RADAR_EVADE_STARE_CHANCE = 30
@@ -87,13 +86,17 @@ class EmulatorViewModel(
         private const val RADAR_ANIM_TICKS_SHORT = 2
         private const val RADAR_ANIM_TICKS_MEDIUM = 3
         private const val RADAR_ANIM_TICKS_WIGGLE = 3
+        private const val RADAR_ANIM_TICKS_LONG = 4
 
         private const val RADAR_TEXT_FOUND_SOMETHING = 0x50B0
         private const val RADAR_TEXT_APPEARED = 0x53B0
         private const val RADAR_TEXT_ATTACKED = 0x59B0
         private const val RADAR_TEXT_EVADED = 0x5B30
+        private const val RADAR_TEXT_CRITICAL_HIT = 0x5CB0
+        private const val RADAR_TEXT_BLANK = 0x5E30
         private const val RADAR_TEXT_THROW_POKEBALL = 0x5FB0
         private const val RADAR_TEXT_CAUGHT = 0x5530
+        private const val RADAR_TEXT_FLED = 0x56B0
         private const val RADAR_TEXT_GOT_AWAY = 0x5230
         private const val RADAR_TEXT_WAS_TOO_STRONG = 0x5830
 
@@ -194,26 +197,33 @@ class EmulatorViewModel(
                 }
                 RadarMode.BattleSwap -> {
                     if (interactionState.radarSwapCursor == 0) {
-                        handleRadarBattleSwapEnter()
+                        cancelRadarBattleSwap()
                         return
                     }
                     interactionState =
                         interactionState.copy(
                             radarSwapCursor = (interactionState.radarSwapCursor - 1).coerceAtLeast(0),
                         )
-                    refreshState(
-                        if (interactionState.radarSwapCursor == 0) {
-                            "Cancel selected. Press LEFT again or ENTER to confirm."
-                        } else {
-                            "Select Cancel or a Pokemon slot to release."
-                        },
-                    )
+                    refreshState("Choose which Pokemon to replace.")
                     return
                 }
                 RadarMode.Scan -> {
                     // Continue with default branch behavior below.
                 }
             }
+        }
+
+        if (interactionState.screen == DeviceScreen.Dowsing && interactionState.dowsingMode == DowsingMode.Swap) {
+            if (interactionState.dowsingSwapCursor == 0) {
+                cancelDowsingSwap()
+                return
+            }
+            interactionState =
+                interactionState.copy(
+                    dowsingSwapCursor = (interactionState.dowsingSwapCursor - 1).coerceAtLeast(0),
+                )
+            refreshState("Choose which item to replace.")
+            return
         }
 
         interactionState =
@@ -292,15 +302,25 @@ class EmulatorViewModel(
                     interactionState =
                         interactionState.copy(
                             radarSwapCursor =
-                                (interactionState.radarSwapCursor + 1).coerceAtMost(DeviceOffsets.POKEMON_SLOT_COUNT),
+                                (interactionState.radarSwapCursor + 1).coerceAtMost(DeviceOffsets.POKEMON_SLOT_COUNT - 1),
                         )
-                    refreshState("Select Cancel or a Pokemon slot to release.")
+                    refreshState("Choose which Pokemon to replace.")
                     return
                 }
                 RadarMode.Scan -> {
                     // Continue with default branch behavior below.
                 }
             }
+        }
+
+        if (interactionState.screen == DeviceScreen.Dowsing && interactionState.dowsingMode == DowsingMode.Swap) {
+            interactionState =
+                interactionState.copy(
+                    dowsingSwapCursor =
+                        (interactionState.dowsingSwapCursor + 1).coerceAtMost(DeviceOffsets.DOWSED_ITEM_COUNT - 1),
+                )
+            refreshState("Choose which item to replace.")
+            return
         }
 
         interactionState =
@@ -500,6 +520,8 @@ class EmulatorViewModel(
                     return
                 }
 
+                val initialSignal = rollRadarSignal()
+
                 currentEngine.setLastSyncNow(Instant.now().epochSecond)
                 interactionState =
                     interactionState.copy(
@@ -508,6 +530,7 @@ class EmulatorViewModel(
                         radarMode = RadarMode.Scan,
                         radarBattleAction = RadarBattleAction.Attack,
                         radarBattleAnimation = RadarBattleAnimation.None,
+                        radarBattleEnemyResponded = false,
                         radarBattleAnimTicksRemaining = 0,
                         radarBattlePokemonSlot = 0,
                         radarBattleMessageOffset = null,
@@ -515,7 +538,8 @@ class EmulatorViewModel(
                         radarPendingCatchSuccess = null,
                         radarChainProgress = 0,
                         radarChainTarget = randomRadarChainTarget(),
-                        radarSignalLevel = rollRadarSignalLevel(),
+                        radarSignalLevel = initialSignal.signalLevel,
+                        radarSignalRouteSlot = initialSignal.routeSlot,
                         radarPlayerHp = RADAR_MAX_HP,
                         radarEnemyHp = RADAR_MAX_HP,
                         radarOutcome = null,
@@ -548,11 +572,13 @@ class EmulatorViewModel(
                 interactionState =
                     interactionState.copy(
                         screen = DeviceScreen.Dowsing,
+                        dowsingCursor = 0,
                         dowsingOutcome = null,
                         dowsingGameOver = false,
                         dowsingWon = null,
                         dowsingMode = DowsingMode.Search,
                         dowsingRevealCursor = -1,
+                        dowsingSwapCursor = 0,
                         dowsingRevealTicksRemaining = 0,
                         dowsingPendingFound = false,
                         dowsingPendingNear = false,
@@ -722,6 +748,7 @@ class EmulatorViewModel(
         val chainTarget = interactionState.radarChainTarget.coerceIn(1, RADAR_CHAIN_MAX)
         val nextChainProgress = interactionState.radarChainProgress + 1
         if (nextChainProgress < chainTarget) {
+            val nextSignal = rollRadarSignal()
             interactionState =
                 interactionState.copy(
                     radarChainProgress = nextChainProgress,
@@ -729,18 +756,23 @@ class EmulatorViewModel(
                     radarResolvedCursor = chosenCursor,
                     radarSignalCursor = randomNextRadarSignalCursor(chosenCursor),
                     radarSignalTicksRemaining = randomRadarSignalWindowTicks(),
-                    radarSignalLevel = rollRadarSignalLevel(),
+                    radarSignalLevel = nextSignal.signalLevel,
+                    radarSignalRouteSlot = nextSignal.routeSlot,
                 )
             refreshState("Rustling grass... keep tracking ($nextChainProgress/$chainTarget).")
             return
         }
 
-        val routeSlot = routeSlotForSignalLevel(interactionState.radarSignalLevel)
+        val routeSlot = interactionState.radarSignalRouteSlot.coerceIn(0, DeviceOffsets.POKEMON_SLOT_COUNT - 1)
         interactionState =
             interactionState.copy(
                 radarMode = RadarMode.BattleMessage,
                 radarBattleAction = RadarBattleAction.Attack,
                 radarBattleAnimation = RadarBattleAnimation.None,
+                radarBattleEnemyResponded = false,
+                radarBattleMessageUsesEnemyName = false,
+                radarBattlePendingEnemyCounterAttack = false,
+                radarBattlePendingCriticalMessage = false,
                 radarBattleAnimTicksRemaining = 0,
                 radarBattlePokemonSlot = routeSlot,
                 radarBattleMessageOffset = RADAR_TEXT_APPEARED,
@@ -762,6 +794,10 @@ class EmulatorViewModel(
         val currentEngine = engine ?: return
         var playerHp = interactionState.radarPlayerHp.coerceIn(0, RADAR_MAX_HP)
         var enemyHp = interactionState.radarEnemyHp.coerceIn(0, RADAR_MAX_HP)
+        var enemyResponded = false
+        var messageUsesEnemyName = false
+        var pendingEnemyCounterAttack = false
+        var pendingCriticalMessage = false
         var messageOffset = RADAR_TEXT_ATTACKED
         var returnHome = false
         var persistMessage: String? = null
@@ -772,41 +808,53 @@ class EmulatorViewModel(
             RadarBattleAction.Attack -> {
                 val enemyEvades = Random.nextInt(100) < RADAR_ATTACK_ENEMY_EVADE_CHANCE
                 if (enemyEvades) {
-                    messageOffset = RADAR_TEXT_EVADED
+                    messageOffset = RADAR_TEXT_ATTACKED
                     battleAnimation = RadarBattleAnimation.AttackEnemyEvade
-                    persistMessage = "Wild Pokemon evaded your attack."
+                    enemyResponded = true
+                    pendingEnemyCounterAttack = true
+                    pendingCriticalMessage = false
+                    messageUsesEnemyName = false
+                    persistMessage = "Attack missed. Wild Pokemon evaded and is counterattacking."
+
+                    if (playerHp <= 1) {
+                        applyRadarLossPenalty(currentEngine)
+                        shouldPersist = true
+                    }
                 } else {
                     val isCritical = Random.nextInt(100) < RADAR_ATTACK_CRIT_CHANCE
                     val damage = if (isCritical) 2 else 1
                     enemyHp = (enemyHp - damage).coerceAtLeast(0)
-                    val enemyResponds =
-                        enemyHp > 0 && Random.nextInt(100) < RADAR_ATTACK_ENEMY_HIT_CHANCE
+                    enemyResponded = enemyHp > 0
+                    pendingCriticalMessage = isCritical
 
-                    if (enemyResponds) {
+                    if (enemyResponded) {
                         playerHp = (playerHp - 1).coerceAtLeast(0)
                     }
+                    pendingEnemyCounterAttack = enemyResponded && playerHp > 0
 
                     battleAnimation =
-                        when {
-                            enemyResponds -> RadarBattleAnimation.AttackTrade
-                            isCritical -> RadarBattleAnimation.AttackCrit
-                            else -> RadarBattleAnimation.AttackHit
+                        if (isCritical) {
+                            RadarBattleAnimation.AttackCrit
+                        } else {
+                            RadarBattleAnimation.AttackHit
                         }
 
                     if (playerHp <= 0) {
                         messageOffset = RADAR_TEXT_WAS_TOO_STRONG
                         returnHome = true
+                        pendingEnemyCounterAttack = false
+                        pendingCriticalMessage = false
                         applyRadarLossPenalty(currentEngine)
                         shouldPersist = true
                         persistMessage = "Your Pokemon was overpowered."
                     } else {
                         messageOffset = RADAR_TEXT_ATTACKED
                         persistMessage =
-                            if (isCritical && enemyResponds) {
+                            if (isCritical && enemyResponded) {
                                 "Critical hit landed. Enemy struck back. Enemy HP: $enemyHp/$RADAR_MAX_HP."
                             } else if (isCritical) {
                                 "Critical hit landed. Enemy HP: $enemyHp/$RADAR_MAX_HP."
-                            } else if (enemyResponds) {
+                            } else if (enemyResponded) {
                                 "Attack landed. Enemy struck back. Enemy HP: $enemyHp/$RADAR_MAX_HP."
                             } else {
                                 "Attack landed. Enemy HP: $enemyHp/$RADAR_MAX_HP."
@@ -816,9 +864,10 @@ class EmulatorViewModel(
                     if (enemyHp <= 0) {
                         returnHome = true
                         shouldPersist = true
+                        pendingEnemyCounterAttack = false
                         currentEngine.setLastSyncNow(Instant.now().epochSecond)
                         persistMessage =
-                            if (enemyResponds) {
+                            if (enemyResponded) {
                                 "Enemy was defeated after trading blows."
                             } else {
                                 "Enemy was defeated."
@@ -827,11 +876,11 @@ class EmulatorViewModel(
 
                     if (!returnHome) {
                         persistMessage =
-                            if (isCritical && enemyResponds) {
+                            if (isCritical && enemyResponded) {
                                 "Critical hit landed. Enemy struck back. Enemy HP: $enemyHp/$RADAR_MAX_HP."
                             } else if (isCritical) {
                                 "Critical hit landed. Enemy HP: $enemyHp/$RADAR_MAX_HP."
-                            } else if (enemyResponds) {
+                            } else if (enemyResponded) {
                                 "Attack landed. Enemy struck back. Enemy HP: $enemyHp/$RADAR_MAX_HP."
                             } else {
                                 "Attack landed. Enemy HP: $enemyHp/$RADAR_MAX_HP."
@@ -892,6 +941,10 @@ class EmulatorViewModel(
                         radarMode = RadarMode.BattleMessage,
                         radarBattleMessageOffset = RADAR_TEXT_THROW_POKEBALL,
                         radarBattleReturnToMenu = false,
+                        radarBattleEnemyResponded = false,
+                        radarBattleMessageUsesEnemyName = false,
+                        radarBattlePendingEnemyCounterAttack = false,
+                        radarBattlePendingCriticalMessage = false,
                         radarPendingCatchSuccess = caught,
                         radarPendingCatchRouteSlot = catchOverflowRouteSlot,
                         radarSwapCursor = 1,
@@ -917,6 +970,10 @@ class EmulatorViewModel(
                 radarMode = RadarMode.BattleMessage,
                 radarBattleMessageOffset = messageOffset,
                 radarBattleReturnToMenu = returnHome,
+                radarBattleEnemyResponded = enemyResponded,
+                radarBattleMessageUsesEnemyName = messageUsesEnemyName,
+                radarBattlePendingEnemyCounterAttack = pendingEnemyCounterAttack,
+                radarBattlePendingCriticalMessage = pendingCriticalMessage,
                 radarPendingCatchSuccess = null,
                 radarPendingCatchRouteSlot = null,
                 radarBattleAnimation = battleAnimation,
@@ -939,7 +996,10 @@ class EmulatorViewModel(
             return
         }
 
-        if (interactionState.radarBattleMessageOffset == RADAR_TEXT_GOT_AWAY) {
+        if (
+            interactionState.radarBattleMessageOffset == RADAR_TEXT_GOT_AWAY ||
+            interactionState.radarBattleMessageOffset == RADAR_TEXT_FLED
+        ) {
             resetRadarToHome("Wild Pokemon got away. Returning Home.", outcome = false)
             return
         }
@@ -972,6 +1032,10 @@ class EmulatorViewModel(
                     interactionState.copy(
                         radarMode = RadarMode.BattleMenu,
                         radarBattleMessageOffset = null,
+                        radarBattleEnemyResponded = false,
+                        radarBattleMessageUsesEnemyName = false,
+                        radarBattlePendingEnemyCounterAttack = false,
+                        radarBattlePendingCriticalMessage = false,
                         radarBattleAnimation = RadarBattleAnimation.None,
                         radarBattleAnimTicksRemaining = 0,
                     )
@@ -984,6 +1048,24 @@ class EmulatorViewModel(
             }
         }
 
+        if (
+            interactionState.radarBattleMessageOffset == RADAR_TEXT_CRITICAL_HIT &&
+            interactionState.radarBattlePendingEnemyCounterAttack
+        ) {
+            interactionState =
+                interactionState.copy(
+                    radarBattleMessageOffset = RADAR_TEXT_ATTACKED,
+                    radarBattleMessageUsesEnemyName = true,
+                    radarBattlePendingEnemyCounterAttack = false,
+                    radarBattlePendingCriticalMessage = false,
+                    radarBattleAnimation = RadarBattleAnimation.EnemyAttack,
+                    radarBattleAnimTicksRemaining =
+                        radarBattleAnimationTicks(RadarBattleAnimation.EnemyAttack),
+                )
+            refreshState("Enemy counterattack.")
+            return
+        }
+
         if (interactionState.radarBattleReturnToMenu) {
             resetRadarToHome("Radar battle finished. Returning Home.")
             return
@@ -993,6 +1075,10 @@ class EmulatorViewModel(
             interactionState.copy(
                 radarMode = RadarMode.BattleMenu,
                 radarBattleMessageOffset = null,
+                radarBattleEnemyResponded = false,
+                radarBattleMessageUsesEnemyName = false,
+                radarBattlePendingEnemyCounterAttack = false,
+                radarBattlePendingCriticalMessage = false,
                 radarBattleAnimation = RadarBattleAnimation.None,
                 radarBattleAnimTicksRemaining = 0,
             )
@@ -1003,6 +1089,47 @@ class EmulatorViewModel(
         handleRadarBattleMessageEnter()
     }
 
+    private fun cancelRadarBattleSwap() {
+        interactionState =
+            interactionState.copy(
+                screen = DeviceScreen.Home,
+                radarMode = RadarMode.Scan,
+                radarPendingCatchSuccess = null,
+                radarPendingCatchRouteSlot = null,
+                radarSwapCursor = 0,
+                radarBattleEnemyResponded = false,
+                radarBattleMessageUsesEnemyName = false,
+                radarBattlePendingEnemyCounterAttack = false,
+                radarBattlePendingCriticalMessage = false,
+                radarBattleAnimation = RadarBattleAnimation.None,
+                radarBattleAnimTicksRemaining = 0,
+            )
+        refreshState("Cancelled catch and kept existing Pokemon.")
+    }
+
+    private fun cancelDowsingSwap() {
+        interactionState =
+            interactionState.copy(
+                screen = DeviceScreen.Home,
+                dowsingCursor = 0,
+                dowsingOutcome = null,
+                dowsingGameOver = false,
+                dowsingWon = null,
+                dowsingMode = DowsingMode.Search,
+                dowsingRevealCursor = -1,
+                dowsingSwapCursor = 0,
+                dowsingRevealTicksRemaining = 0,
+                dowsingPendingFound = false,
+                dowsingPendingNear = false,
+                dowsingPendingStored = false,
+                dowsingCheckedMask = 0,
+                dowsingResultItemIndex = null,
+                dowsingFeedback = DowsingFeedback.None,
+                dowsingIdleTicksRemaining = 0,
+            )
+        refreshState("Cancelled item swap and kept current items.")
+    }
+
     private fun handleRadarBattleSwapEnter() {
         val currentEngine = engine ?: return
         val routeSlot = interactionState.radarPendingCatchRouteSlot
@@ -1011,23 +1138,7 @@ class EmulatorViewModel(
             return
         }
 
-        val selected = interactionState.radarSwapCursor.coerceIn(0, DeviceOffsets.POKEMON_SLOT_COUNT)
-        if (selected == 0) {
-            interactionState =
-                interactionState.copy(
-                    screen = DeviceScreen.Home,
-                    radarMode = RadarMode.Scan,
-                    radarPendingCatchSuccess = null,
-                    radarPendingCatchRouteSlot = null,
-                    radarSwapCursor = 0,
-                    radarBattleAnimation = RadarBattleAnimation.None,
-                    radarBattleAnimTicksRemaining = 0,
-                )
-            refreshState("Cancelled catch and kept existing Pokemon.")
-            return
-        }
-
-        val replaceSlot = (selected - 1).coerceIn(0, DeviceOffsets.POKEMON_SLOT_COUNT - 1)
+        val replaceSlot = interactionState.radarSwapCursor.coerceIn(0, DeviceOffsets.POKEMON_SLOT_COUNT - 1)
         val replaced = currentEngine.replaceCaughtPokemonWithRoute(replaceSlot, routeSlot)
         if (!replaced) {
             resetRadarToHome("Could not swap caught Pokemon. Returning Home.", outcome = false)
@@ -1042,6 +1153,10 @@ class EmulatorViewModel(
                 radarPendingCatchSuccess = null,
                 radarPendingCatchRouteSlot = null,
                 radarSwapCursor = 0,
+                radarBattleEnemyResponded = false,
+                radarBattleMessageUsesEnemyName = false,
+                radarBattlePendingEnemyCounterAttack = false,
+                radarBattlePendingCriticalMessage = false,
                 radarBattleAnimation = RadarBattleAnimation.None,
                 radarBattleAnimTicksRemaining = 0,
             )
@@ -1060,11 +1175,13 @@ class EmulatorViewModel(
             interactionState =
                 interactionState.copy(
                     screen = DeviceScreen.Home,
+                    dowsingCursor = 0,
                     dowsingOutcome = null,
                     dowsingGameOver = false,
                     dowsingWon = null,
                     dowsingMode = DowsingMode.Search,
                     dowsingRevealCursor = -1,
+                    dowsingSwapCursor = 0,
                     dowsingRevealTicksRemaining = 0,
                     dowsingPendingFound = false,
                     dowsingPendingNear = false,
@@ -1102,7 +1219,12 @@ class EmulatorViewModel(
                 val checkedMask = interactionState.dowsingCheckedMask or (1 shl selected)
                 val remaining = (interactionState.dowsingAttemptsRemaining - 1).coerceAtLeast(0)
                 val resolvedItemIndex = if (found) rollDowsingRouteItemIndex() else interactionState.dowsingTargetItemIndex
-                val stored = if (found) currentEngine.recordDowsedItemFromRoute(resolvedItemIndex) else false
+                val stored =
+                    if (found && currentEngine.hasFreeDowsedItemSlot()) {
+                        currentEngine.recordDowsedItemFromRoute(resolvedItemIndex)
+                    } else {
+                        false
+                    }
 
                 interactionState =
                     interactionState.copy(
@@ -1147,16 +1269,160 @@ class EmulatorViewModel(
                 refreshState("Dowsing scan...")
             }
 
-            DowsingMode.FoundMessage,
-            DowsingMode.EndMessage -> {
+            DowsingMode.FoundMessage -> {
+                if (!interactionState.dowsingPendingStored) {
+                    val pendingItemIndex = interactionState.dowsingResultItemIndex
+                    if (pendingItemIndex == null) {
+                        interactionState =
+                            interactionState.copy(
+                                screen = DeviceScreen.Home,
+                                dowsingCursor = 0,
+                                dowsingOutcome = null,
+                                dowsingGameOver = false,
+                                dowsingWon = null,
+                                dowsingMode = DowsingMode.Search,
+                                dowsingRevealCursor = -1,
+                                dowsingSwapCursor = 0,
+                                dowsingRevealTicksRemaining = 0,
+                                dowsingPendingFound = false,
+                                dowsingPendingNear = false,
+                                dowsingPendingStored = false,
+                                dowsingCheckedMask = 0,
+                                dowsingResultItemIndex = null,
+                                dowsingFeedback = DowsingFeedback.None,
+                                dowsingIdleTicksRemaining = 0,
+                            )
+                        refreshState("No found item to swap. Returning Home.")
+                        return
+                    }
+
+                    interactionState =
+                        interactionState.copy(
+                            dowsingMode = DowsingMode.Swap,
+                            dowsingSwapCursor = 0,
+                            dowsingRevealCursor = -1,
+                            dowsingRevealTicksRemaining = 0,
+                            dowsingResultItemIndex = pendingItemIndex,
+                        )
+                    refreshState("Bag is full. Choose which item to replace.")
+                    return
+                }
+
+                currentEngine.setLastSyncNow(Instant.now().epochSecond)
                 interactionState =
                     interactionState.copy(
                         screen = DeviceScreen.Home,
+                        dowsingCursor = 0,
                         dowsingOutcome = null,
                         dowsingGameOver = false,
                         dowsingWon = null,
                         dowsingMode = DowsingMode.Search,
                         dowsingRevealCursor = -1,
+                        dowsingSwapCursor = 0,
+                        dowsingRevealTicksRemaining = 0,
+                        dowsingPendingFound = false,
+                        dowsingPendingNear = false,
+                        dowsingPendingStored = false,
+                        dowsingCheckedMask = 0,
+                        dowsingResultItemIndex = null,
+                        dowsingFeedback = DowsingFeedback.None,
+                        dowsingIdleTicksRemaining = 0,
+                    )
+
+                viewModelScope.launch {
+                    persistAndRefresh("Dowsing finished: item stored.")
+                }
+            }
+
+            DowsingMode.Swap -> {
+                val pendingItemIndex = interactionState.dowsingResultItemIndex
+                if (pendingItemIndex == null) {
+                    interactionState =
+                        interactionState.copy(
+                            screen = DeviceScreen.Home,
+                            dowsingCursor = 0,
+                            dowsingOutcome = null,
+                            dowsingGameOver = false,
+                            dowsingWon = null,
+                            dowsingMode = DowsingMode.Search,
+                            dowsingRevealCursor = -1,
+                            dowsingSwapCursor = 0,
+                            dowsingRevealTicksRemaining = 0,
+                            dowsingPendingFound = false,
+                            dowsingPendingNear = false,
+                            dowsingPendingStored = false,
+                            dowsingCheckedMask = 0,
+                            dowsingResultItemIndex = null,
+                            dowsingFeedback = DowsingFeedback.None,
+                            dowsingIdleTicksRemaining = 0,
+                        )
+                    refreshState("No found item to swap. Returning Home.")
+                    return
+                }
+
+                val replaceSlot = interactionState.dowsingSwapCursor.coerceIn(0, DeviceOffsets.DOWSED_ITEM_COUNT - 1)
+                val replaced = currentEngine.replaceDowsedItemWithRoute(replaceSlot, pendingItemIndex)
+                if (!replaced) {
+                    interactionState =
+                        interactionState.copy(
+                            screen = DeviceScreen.Home,
+                            dowsingCursor = 0,
+                            dowsingOutcome = null,
+                            dowsingGameOver = false,
+                            dowsingWon = null,
+                            dowsingMode = DowsingMode.Search,
+                            dowsingRevealCursor = -1,
+                            dowsingSwapCursor = 0,
+                            dowsingRevealTicksRemaining = 0,
+                            dowsingPendingFound = false,
+                            dowsingPendingNear = false,
+                            dowsingPendingStored = false,
+                            dowsingCheckedMask = 0,
+                            dowsingResultItemIndex = null,
+                            dowsingFeedback = DowsingFeedback.None,
+                            dowsingIdleTicksRemaining = 0,
+                        )
+                    refreshState("Could not swap item. Returning Home.")
+                    return
+                }
+
+                currentEngine.setLastSyncNow(Instant.now().epochSecond)
+                interactionState =
+                    interactionState.copy(
+                        screen = DeviceScreen.Home,
+                        dowsingCursor = 0,
+                        dowsingOutcome = null,
+                        dowsingGameOver = false,
+                        dowsingWon = null,
+                        dowsingMode = DowsingMode.Search,
+                        dowsingRevealCursor = -1,
+                        dowsingSwapCursor = 0,
+                        dowsingRevealTicksRemaining = 0,
+                        dowsingPendingFound = false,
+                        dowsingPendingNear = false,
+                        dowsingPendingStored = false,
+                        dowsingCheckedMask = 0,
+                        dowsingResultItemIndex = null,
+                        dowsingFeedback = DowsingFeedback.None,
+                        dowsingIdleTicksRemaining = 0,
+                    )
+
+                viewModelScope.launch {
+                    persistAndRefresh("Swapped found item and kept the new one.")
+                }
+            }
+
+            DowsingMode.EndMessage -> {
+                interactionState =
+                    interactionState.copy(
+                        screen = DeviceScreen.Home,
+                        dowsingCursor = 0,
+                        dowsingOutcome = null,
+                        dowsingGameOver = false,
+                        dowsingWon = null,
+                        dowsingMode = DowsingMode.Search,
+                        dowsingRevealCursor = -1,
+                        dowsingSwapCursor = 0,
                         dowsingRevealTicksRemaining = 0,
                         dowsingPendingFound = false,
                         dowsingPendingNear = false,
@@ -1313,14 +1579,21 @@ class EmulatorViewModel(
                             "LEFT/ENTER/RIGHT: continue"
                         }
                     RadarMode.BattleSwap ->
-                        "LEFT/RIGHT: cancel or choose slot, ENTER: confirm"
+                        "LEFT/RIGHT choose slot, LEFT at first cancels, ENTER confirm"
                 }
             DeviceScreen.Dowsing -> {
                 if (
+                    interactionState.dowsingMode == DowsingMode.FoundMessage &&
+                    !interactionState.dowsingPendingStored
+                ) {
+                    "ENTER: choose item to replace"
+                } else if (
                     interactionState.dowsingMode == DowsingMode.FoundMessage ||
                     interactionState.dowsingMode == DowsingMode.EndMessage
                 ) {
                     "ENTER: return Home"
+                } else if (interactionState.dowsingMode == DowsingMode.Swap) {
+                    "LEFT/RIGHT choose slot, LEFT at first cancels, ENTER confirm"
                 } else if (interactionState.dowsingMode == DowsingMode.Reveal) {
                     "Scanning..."
                 } else if (interactionState.dowsingMode == DowsingMode.MissMessage) {
@@ -1432,11 +1705,13 @@ class EmulatorViewModel(
                         val nextTicks = interactionState.radarSignalTicksRemaining - 1
                         if (nextTicks <= 0) {
                             val currentSignal = interactionState.radarSignalCursor ?: 0
+                            val nextSignal = rollRadarSignal()
                             interactionState.copy(
                                 radarResolvedCursor = currentSignal,
                                 radarSignalCursor = randomNextRadarSignalCursor(currentSignal),
                                 radarSignalTicksRemaining = randomRadarSignalWindowTicks(),
-                                radarSignalLevel = rollRadarSignalLevel(),
+                                radarSignalLevel = nextSignal.signalLevel,
+                                radarSignalRouteSlot = nextSignal.routeSlot,
                                 radarOutcome = null,
                             )
                         } else {
@@ -1644,14 +1919,48 @@ class EmulatorViewModel(
     }
 
     private fun randomRadarChainTarget(): Int {
-        return Random.nextInt(1, RADAR_CHAIN_MAX + 1)
+        return 1
     }
 
-    private fun rollRadarSignalLevel(): Int {
-        val currentEngine = engine ?: return 1
+    private data class RadarSignal(
+        val routeSlot: Int,
+        val signalLevel: Int,
+    )
+
+    private fun rollRadarSignal(): RadarSignal {
+        val currentEngine = engine ?: return RadarSignal(routeSlot = 0, signalLevel = 1)
         val eeprom = currentEngine.exportEeprom()
         val slot = rollRadarRouteSlot(eeprom)
-        return (slot + 1).coerceIn(1, 3)
+        return RadarSignal(
+            routeSlot = slot,
+            signalLevel = signalLevelForRouteSlot(eeprom, slot),
+        )
+    }
+
+    private fun signalLevelForRouteSlot(
+        eeprom: ByteArray,
+        slot: Int,
+    ): Int {
+        val available =
+            (0 until DeviceOffsets.POKEMON_SLOT_COUNT)
+                .mapNotNull { candidate ->
+                    val species = DeviceBinary.readRoutePokemonSpecies(eeprom, candidate)
+                    if (species == 0) {
+                        null
+                    } else {
+                        val chance = DeviceBinary.readRoutePokemonChance(eeprom, candidate).coerceIn(0, 100)
+                        candidate to chance
+                    }
+                }
+                .sortedByDescending { (_, chance) -> chance }
+
+        val rank = available.indexOfFirst { (candidate, _) -> candidate == slot }
+        return when (rank) {
+            0 -> 1
+            1 -> 2
+            2 -> 3
+            else -> (slot + 1).coerceIn(1, 3)
+        }
     }
 
     private fun rollRadarRouteSlot(eeprom: ByteArray): Int {
@@ -1707,10 +2016,6 @@ class EmulatorViewModel(
         }
     }
 
-    private fun routeSlotForSignalLevel(signalLevel: Int): Int {
-        return (signalLevel - 1).coerceIn(0, DeviceOffsets.POKEMON_SLOT_COUNT - 1)
-    }
-
     private fun radarCatchChancePercent(enemyHp: Int): Int {
         return when (enemyHp.coerceIn(0, RADAR_MAX_HP)) {
             4 -> 25
@@ -1723,6 +2028,80 @@ class EmulatorViewModel(
 
     private fun onRadarBattleAnimationFinished(state: DeviceInteractionState): DeviceInteractionState {
         return when (state.radarBattleAnimation) {
+            RadarBattleAnimation.AttackHit,
+            RadarBattleAnimation.AttackCrit,
+                -> {
+                    if (state.radarBattlePendingCriticalMessage) {
+                        state.copy(
+                            radarBattleMessageOffset = RADAR_TEXT_CRITICAL_HIT,
+                            radarBattleMessageUsesEnemyName = false,
+                            radarBattlePendingCriticalMessage = false,
+                            radarBattleAnimation = RadarBattleAnimation.None,
+                            radarBattleAnimTicksRemaining = 0,
+                        )
+                    } else if (state.radarBattlePendingEnemyCounterAttack) {
+                        state.copy(
+                            radarBattleMessageOffset = RADAR_TEXT_ATTACKED,
+                            radarBattleMessageUsesEnemyName = true,
+                            radarBattlePendingEnemyCounterAttack = false,
+                            radarBattlePendingCriticalMessage = false,
+                            radarBattleAnimation = RadarBattleAnimation.EnemyAttack,
+                            radarBattleAnimTicksRemaining =
+                                radarBattleAnimationTicks(RadarBattleAnimation.EnemyAttack),
+                        )
+                    } else {
+                        state.copy(
+                            radarBattlePendingCriticalMessage = false,
+                            radarBattleAnimation = RadarBattleAnimation.None,
+                            radarBattleAnimTicksRemaining = 0,
+                        )
+                    }
+                }
+
+            RadarBattleAnimation.AttackEnemyEvade -> {
+                if (state.radarBattlePendingEnemyCounterAttack) {
+                    val nextPlayerHp = (state.radarPlayerHp - 1).coerceAtLeast(0)
+                    state.copy(
+                        radarPlayerHp = nextPlayerHp,
+                        radarBattleMessageOffset = RADAR_TEXT_EVADED,
+                        radarBattleReturnToMenu = false,
+                        radarBattleEnemyResponded = true,
+                        radarBattleMessageUsesEnemyName = false,
+                        radarBattlePendingEnemyCounterAttack = false,
+                        radarBattlePendingCriticalMessage = false,
+                        radarBattleAnimation = RadarBattleAnimation.EnemyAttack,
+                        radarBattleAnimTicksRemaining =
+                            radarBattleAnimationTicks(RadarBattleAnimation.EnemyAttack),
+                    )
+                } else {
+                    state.copy(
+                        radarBattleAnimation = RadarBattleAnimation.None,
+                        radarBattleAnimTicksRemaining = 0,
+                    )
+                }
+            }
+
+            RadarBattleAnimation.EnemyAttack -> {
+                if (state.radarPlayerHp <= 0) {
+                    state.copy(
+                        radarBattleMessageOffset = RADAR_TEXT_WAS_TOO_STRONG,
+                        radarBattleReturnToMenu = true,
+                        radarBattleEnemyResponded = false,
+                        radarBattleMessageUsesEnemyName = false,
+                        radarBattlePendingEnemyCounterAttack = false,
+                        radarBattlePendingCriticalMessage = false,
+                        radarBattleAnimation = RadarBattleAnimation.None,
+                        radarBattleAnimTicksRemaining = 0,
+                    )
+                } else {
+                    state.copy(
+                        radarBattlePendingCriticalMessage = false,
+                        radarBattleAnimation = RadarBattleAnimation.None,
+                        radarBattleAnimTicksRemaining = 0,
+                    )
+                }
+            }
+
             RadarBattleAnimation.CatchThrow -> {
                 if (state.radarPendingCatchSuccess == true) {
                     state.copy(
@@ -1732,8 +2111,12 @@ class EmulatorViewModel(
                     )
                 } else {
                     state.copy(
-                        radarBattleMessageOffset = RADAR_TEXT_GOT_AWAY,
-                        radarBattleReturnToMenu = true,
+                        radarBattleMessageOffset = RADAR_TEXT_BLANK,
+                        radarBattleReturnToMenu = false,
+                        radarBattleEnemyResponded = false,
+                        radarBattleMessageUsesEnemyName = false,
+                        radarBattlePendingEnemyCounterAttack = false,
+                        radarBattlePendingCriticalMessage = false,
                         radarPendingCatchSuccess = null,
                         radarPendingCatchRouteSlot = null,
                         radarBattleAnimation = RadarBattleAnimation.CatchFail,
@@ -1751,6 +2134,10 @@ class EmulatorViewModel(
                         radarSwapCursor = 1,
                         radarBattleMessageOffset = null,
                         radarBattleReturnToMenu = false,
+                        radarBattleEnemyResponded = false,
+                        radarBattleMessageUsesEnemyName = false,
+                        radarBattlePendingEnemyCounterAttack = false,
+                        radarBattlePendingCriticalMessage = false,
                         radarPendingCatchSuccess = null,
                         radarBattleAnimation = RadarBattleAnimation.None,
                         radarBattleAnimTicksRemaining = 0,
@@ -1759,6 +2146,10 @@ class EmulatorViewModel(
                     state.copy(
                         radarBattleMessageOffset = RADAR_TEXT_CAUGHT,
                         radarBattleReturnToMenu = true,
+                        radarBattleEnemyResponded = false,
+                        radarBattleMessageUsesEnemyName = false,
+                        radarBattlePendingEnemyCounterAttack = false,
+                        radarBattlePendingCriticalMessage = false,
                         radarPendingCatchSuccess = null,
                         radarPendingCatchRouteSlot = null,
                         radarBattleAnimation = RadarBattleAnimation.CatchSuccess,
@@ -1770,11 +2161,31 @@ class EmulatorViewModel(
 
             RadarBattleAnimation.CatchSuccess,
             RadarBattleAnimation.CatchFail,
-                -> state.copy(
-                    radarPendingCatchRouteSlot = null,
-                    radarBattleAnimation = RadarBattleAnimation.None,
-                    radarBattleAnimTicksRemaining = 0,
-                )
+                -> {
+                    if (state.radarBattleAnimation == RadarBattleAnimation.CatchFail) {
+                        state.copy(
+                            radarBattleMessageOffset = RADAR_TEXT_FLED,
+                            radarBattleReturnToMenu = true,
+                            radarBattleEnemyResponded = false,
+                            radarBattleMessageUsesEnemyName = false,
+                            radarBattlePendingEnemyCounterAttack = false,
+                            radarBattlePendingCriticalMessage = false,
+                            radarPendingCatchRouteSlot = null,
+                            radarBattleAnimation = RadarBattleAnimation.None,
+                            radarBattleAnimTicksRemaining = 0,
+                        )
+                    } else {
+                        state.copy(
+                            radarBattleEnemyResponded = false,
+                            radarBattleMessageUsesEnemyName = false,
+                            radarBattlePendingEnemyCounterAttack = false,
+                            radarBattlePendingCriticalMessage = false,
+                            radarPendingCatchRouteSlot = null,
+                            radarBattleAnimation = RadarBattleAnimation.None,
+                            radarBattleAnimTicksRemaining = 0,
+                        )
+                    }
+                }
 
             else -> {
                 state.copy(
@@ -1788,19 +2199,21 @@ class EmulatorViewModel(
     private fun radarBattleAnimationTicks(animation: RadarBattleAnimation): Int {
         return when (animation) {
             RadarBattleAnimation.None -> 0
-            RadarBattleAnimation.AttackHit,
-            RadarBattleAnimation.AttackCrit,
             RadarBattleAnimation.AttackTrade,
-            RadarBattleAnimation.AttackEnemyEvade,
+            RadarBattleAnimation.EnemyAttack,
             RadarBattleAnimation.EvadeCounter,
             RadarBattleAnimation.EvadeStandoff,
                 -> RADAR_ANIM_TICKS_SHORT
 
+            RadarBattleAnimation.AttackHit,
+            RadarBattleAnimation.AttackCrit,
             RadarBattleAnimation.EvadeEnemyFlee,
+            RadarBattleAnimation.AttackEnemyEvade,
             RadarBattleAnimation.CatchThrow,
             RadarBattleAnimation.CatchSuccess,
-            RadarBattleAnimation.CatchFail,
                 -> RADAR_ANIM_TICKS_MEDIUM
+
+            RadarBattleAnimation.CatchFail -> RADAR_ANIM_TICKS_LONG
 
             RadarBattleAnimation.CatchWiggle -> RADAR_ANIM_TICKS_WIGGLE
         }
@@ -1832,6 +2245,10 @@ class EmulatorViewModel(
                 radarMode = RadarMode.Scan,
                 radarBattleAction = RadarBattleAction.Attack,
                 radarBattleAnimation = RadarBattleAnimation.None,
+                radarBattleEnemyResponded = false,
+                radarBattleMessageUsesEnemyName = false,
+                radarBattlePendingEnemyCounterAttack = false,
+                radarBattlePendingCriticalMessage = false,
                 radarBattleAnimTicksRemaining = 0,
                 radarBattlePokemonSlot = 0,
                 radarSwapCursor = 0,

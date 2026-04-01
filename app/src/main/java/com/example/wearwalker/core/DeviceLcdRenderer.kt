@@ -89,8 +89,10 @@ object DeviceLcdRenderer {
     private const val TEXT_IT_GOT_AWAY = 0x5230
     private const val TEXT_APPEARED = 0x53B0
     private const val TEXT_WAS_CAUGHT = 0x5530
+    private const val TEXT_FLED = 0x56B0
     private const val TEXT_ATTACKED = 0x59B0
     private const val TEXT_EVADED = 0x5B30
+    private const val TEXT_CRITICAL_HIT = 0x5CB0
     private const val TEXT_BLANK = 0x5E30
     private const val TEXT_THROW_POKEBALL = 0x5FB0
     private const val TEXT_SWITCH = 0x8B30
@@ -283,39 +285,45 @@ object DeviceLcdRenderer {
             if (index == state.radarCursor) {
                 blit(frame, arrowRight, 8, 8, x - 8, y + 8)
             }
+        }
 
-            if (state.radarSignalCursor == index) {
-                val exclamation =
-                    when (state.radarSignalLevel.coerceIn(1, 3)) {
-                        1 -> exclamation0
-                        2 -> exclamation1
-                        else -> exclamation2
-                    }
-                if (animationFrame % 2 == 0) {
-                    blit(frame, exclamation, 16, 16, x + 16, y)
+        val signalCursor = state.radarSignalCursor
+        if (signalCursor != null && signalCursor in patches.indices && animationFrame % 2 == 0) {
+            val exclamation =
+                when (state.radarSignalLevel.coerceIn(1, 3)) {
+                    1 -> exclamation0
+                    2 -> exclamation1
+                    else -> exclamation2
                 }
-            }
+            val (x, y) = patches[signalCursor]
+            val exclamationX = (x + 16).coerceAtMost(WIDTH - 16)
+            val exclamationY = (y - 8).coerceAtLeast(0)
+            blit(frame, exclamation, 16, 16, exclamationX, exclamationY)
         }
 
         val bottomMessage =
             when (state.radarOutcome) {
-            true -> {
-                val signal = state.radarResolvedCursor ?: state.radarCursor
-                val (x, y) = patches[signal.coerceIn(0, patches.lastIndex)]
-                blit(frame, click, 16, 16, x + 16, y)
-                foundSomethingText
-            }
-            false -> {
-                gotAwayText
-            }
-            null -> {
-                if (state.radarSignalCursor == null) {
-                    findText
-                } else {
+                true -> {
+                    val signal = state.radarResolvedCursor ?: state.radarCursor
+                    val (x, y) = patches[signal.coerceIn(0, patches.lastIndex)]
+                    val clickX = (x + 16).coerceAtMost(WIDTH - 16)
+                    val clickY = (y - 8).coerceAtLeast(0)
+                    blit(frame, click, 16, 16, clickX, clickY)
                     foundSomethingText
                 }
+
+                false -> {
+                    gotAwayText
+                }
+
+                null -> {
+                    if (state.radarSignalCursor == null) {
+                        findText
+                    } else {
+                        foundSomethingText
+                    }
+                }
             }
-        }
 
         drawBottomMessageBox(frame, bottomMessage)
 
@@ -382,26 +390,27 @@ object DeviceLcdRenderer {
         var showBall = false
         var ballX = 0
         var ballY = 0
+        val messageOffset = state.radarBattleMessageOffset ?: TEXT_BLANK
 
         when (battleAnimation) {
             RadarBattleAnimation.AttackHit -> {
                 playerX = 54
                 showImpact = true
-                impactX = enemyX + 20
+                impactX = 40
             }
 
             RadarBattleAnimation.AttackCrit -> {
                 playerX = 54
                 showImpact = true
                 impactSprite = critFlash
-                impactX = enemyX + 20
+                impactX = 40
             }
 
             RadarBattleAnimation.AttackTrade -> {
                 if (animTicks >= 2) {
                     playerX = 52
                     showImpact = true
-                    impactX = enemyX + 20
+                    impactX = 40
                 } else {
                     enemyX = 28
                     showImpact = true
@@ -410,10 +419,18 @@ object DeviceLcdRenderer {
             }
 
             RadarBattleAnimation.AttackEnemyEvade -> {
+                playerX = 52
                 enemyX = if (animTicks >= 2) -8 else -16
-                showSmoke = true
-                smokeX = 0
-                smokeY = 4
+            }
+
+            RadarBattleAnimation.EnemyAttack -> {
+                if (animTicks >= 2) {
+                    enemyX = 18
+                } else {
+                    enemyX = 28
+                    showImpact = true
+                    impactX = playerX - 10
+                }
             }
 
             RadarBattleAnimation.EvadeCounter -> {
@@ -475,21 +492,43 @@ object DeviceLcdRenderer {
                 ballX = 18
                 ballY = 12
                 showCatchStars = true
-                catchStarsX = 30
-                catchStarsY = 8
+                catchStarsX = 14
+                catchStarsY = 6
             }
 
             RadarBattleAnimation.CatchFail -> {
-                showBall = true
-                ballX = 18
-                ballY = 12
-                if (animTicks >= 2) {
-                    hideEnemy = true
-                    showSmoke = true
-                    smokeX = 8
-                    smokeY = 4
-                } else {
-                    enemyX = 30 + selectorBounceOffset(animationFrame)
+                when {
+                    animTicks >= 4 -> {
+                        showBall = true
+                        ballX = 18
+                        ballY = 12
+                        hideEnemy = true
+                    }
+
+                    animTicks == 3 -> {
+                        showBall = true
+                        ballX = 18
+                        ballY = 12
+                        hideEnemy = true
+                        showSmoke = true
+                        smokeX = 8
+                        smokeY = 4
+                    }
+
+                    animTicks == 2 -> {
+                        showBall = false
+                        hideEnemy = false
+                        enemyX = 6
+                    }
+
+                    else -> {
+                        showBall = false
+                        hideEnemy = false
+                        enemyX = -10 + selectorBounceOffset(animationFrame)
+                        showSmoke = true
+                        smokeX = (enemyX + 10).coerceAtLeast(0)
+                        smokeY = 6
+                    }
                 }
             }
 
@@ -498,7 +537,9 @@ object DeviceLcdRenderer {
             }
         }
 
-        drawBattleSplit(frame)
+        if (battleAnimation == RadarBattleAnimation.None && (messageOffset == TEXT_FLED || messageOffset == TEXT_IT_GOT_AWAY)) {
+            hideEnemy = true
+        }
 
         if (!hideEnemy) {
             blit(frame, enemyPoke, 32, 24, enemyX, enemyY)
@@ -525,7 +566,7 @@ object DeviceLcdRenderer {
         }
 
         drawRadarHpBlocks(frame, hpBarBlock, startX = 2, startY = 24, hp = state.radarEnemyHp, maxHp = 4)
-        drawRadarHpBlocks(frame, hpBarBlock, startX = 62, startY = 24, hp = state.radarPlayerHp, maxHp = 4)
+        drawRadarHpBlocks(frame, hpBarBlock, startX = 62, startY = 0, hp = state.radarPlayerHp, maxHp = 4)
 
         val showBattleMenu = state.radarMode == RadarMode.BattleMenu && state.radarBattleMessageOffset == null
         if (showBattleMenu) {
@@ -533,8 +574,9 @@ object DeviceLcdRenderer {
             blit(frame, battleMenu, 96, 32, 0, 32)
             drawHorizontalLine(frame, y = 31, color = palette[3])
         } else {
-            val messageOffset = state.radarBattleMessageOffset ?: TEXT_BLANK
-            if (messageOffset == TEXT_APPEARED) {
+            if (messageOffset == TEXT_BLANK && battleAnimation == RadarBattleAnimation.CatchFail) {
+                // Keep the battlefield visible during flee animation, without showing a text box yet.
+            } else if (messageOffset == TEXT_APPEARED) {
                 val message = decodeSprite(spriteData, TEXT_APPEARED, 96, 16)
                 val pokemonName =
                     decodeSprite(
@@ -543,23 +585,35 @@ object DeviceLcdRenderer {
                         80,
                         16,
                     )
-                fillRect(frame, 8, 32, 87, 47, palette[0])
+                fillRect(frame, 0, 32, WIDTH - 1, HEIGHT - 1, palette[0])
+                drawBattleMessageBoxBorder(frame)
+
+                val nameX = leftAlignedSpriteDstX(pokemonName, 80, 16, innerLeft = 1, innerRight = 87)
                 blitClipped(
                     dst = frame,
                     src = pokemonName,
                     srcWidth = 80,
                     srcHeight = 16,
-                    dstX = 8,
-                    dstY = 32,
-                    clipMinX = 8,
-                    clipMinY = 32,
-                    clipMaxX = 87,
-                    clipMaxY = 47,
+                    dstX = nameX,
+                    dstY = 33,
+                    clipMinX = 1,
+                    clipMinY = 33,
+                    clipMaxX = WIDTH - 2,
+                    clipMaxY = 62,
                 )
-                drawBottomMessageBox(
-                    frame = frame,
-                    messageSprite = message,
-                    clipToInner = true,
+
+                val appearedX = leftAlignedSpriteDstX(message, 96, 16, innerLeft = 1, innerRight = WIDTH - 2)
+                blitClipped(
+                    dst = frame,
+                    src = message,
+                    srcWidth = 96,
+                    srcHeight = 16,
+                    dstX = appearedX,
+                    dstY = 48,
+                    clipMinX = 1,
+                    clipMinY = 33,
+                    clipMaxX = WIDTH - 2,
+                    clipMaxY = 62,
                 )
             } else if (messageOffset == TEXT_FOUND_SOMETHING) {
                 val pokemonName =
@@ -574,11 +628,160 @@ object DeviceLcdRenderer {
                     messageSprite = pokemonName,
                     messageWidth = 80,
                     messageX = 8,
-                    clipToInner = true,
+                    clipToInner = false,
+                )
+            } else if (
+                messageOffset == TEXT_ATTACKED &&
+                state.radarBattleAction == RadarBattleAction.Attack
+            ) {
+                val attacked = decodeSprite(spriteData, TEXT_ATTACKED, 96, 16)
+                val walkingName =
+                    decodeSprite(
+                        spriteData,
+                        WALKING_POKEMON_NAME,
+                        80,
+                        16,
+                    )
+                val enemyName =
+                    decodeSprite(
+                        spriteData,
+                        ROUTE_POKEMON0_NAME + routeSlot * ROUTE_POKEMON_NAME_STRIDE,
+                        80,
+                        16,
+                    )
+
+                val nameSprite = if (state.radarBattleMessageUsesEnemyName) enemyName else walkingName
+
+                fillRect(frame, 0, 32, WIDTH - 1, HEIGHT - 1, palette[0])
+                drawBattleMessageBoxBorder(frame)
+
+                val nameX = leftAlignedSpriteDstX(nameSprite, 80, 16, innerLeft = 1, innerRight = 87)
+                blitClipped(
+                    dst = frame,
+                    src = nameSprite,
+                    srcWidth = 80,
+                    srcHeight = 16,
+                    dstX = nameX,
+                    dstY = 33,
+                    clipMinX = 1,
+                    clipMinY = 33,
+                    clipMaxX = WIDTH - 2,
+                    clipMaxY = 62,
+                )
+
+                val attackedX = leftAlignedSpriteDstX(attacked, 96, 16, innerLeft = 1, innerRight = WIDTH - 2)
+                blitClipped(
+                    dst = frame,
+                    src = attacked,
+                    srcWidth = 96,
+                    srcHeight = 16,
+                    dstX = attackedX,
+                    dstY = 48,
+                    clipMinX = 1,
+                    clipMinY = 33,
+                    clipMaxX = WIDTH - 2,
+                    clipMaxY = 62,
+                )
+            } else if (messageOffset == TEXT_CRITICAL_HIT) {
+                val critical = decodeSprite(spriteData, TEXT_CRITICAL_HIT, 96, 16)
+                fillRect(frame, 0, 32, WIDTH - 1, HEIGHT - 1, palette[0])
+                drawBattleMessageBoxBorder(frame)
+
+                val criticalX = leftAlignedSpriteDstX(critical, 96, 16, innerLeft = 1, innerRight = WIDTH - 2)
+                blitClipped(
+                    dst = frame,
+                    src = critical,
+                    srcWidth = 96,
+                    srcHeight = 16,
+                    dstX = criticalX,
+                    dstY = 33,
+                    clipMinX = 1,
+                    clipMinY = 33,
+                    clipMaxX = WIDTH - 2,
+                    clipMaxY = 62,
+                )
+            } else if (messageOffset == TEXT_EVADED && state.radarBattleAction == RadarBattleAction.Attack) {
+                val evaded = decodeSprite(spriteData, TEXT_EVADED, 96, 16)
+                val enemyName =
+                    decodeSprite(
+                        spriteData,
+                        ROUTE_POKEMON0_NAME + routeSlot * ROUTE_POKEMON_NAME_STRIDE,
+                        80,
+                        16,
+                    )
+                fillRect(frame, 0, 32, WIDTH - 1, HEIGHT - 1, palette[0])
+                drawBattleMessageBoxBorder(frame)
+
+                val nameX = leftAlignedSpriteDstX(enemyName, 80, 16, innerLeft = 1, innerRight = 87)
+                blitClipped(
+                    dst = frame,
+                    src = enemyName,
+                    srcWidth = 80,
+                    srcHeight = 16,
+                    dstX = nameX,
+                    dstY = 33,
+                    clipMinX = 1,
+                    clipMinY = 33,
+                    clipMaxX = WIDTH - 2,
+                    clipMaxY = 62,
+                )
+
+                val evadedX = leftAlignedSpriteDstX(evaded, 96, 16, innerLeft = 1, innerRight = WIDTH - 2)
+                blitClipped(
+                    dst = frame,
+                    src = evaded,
+                    srcWidth = 96,
+                    srcHeight = 16,
+                    dstX = evadedX,
+                    dstY = 48,
+                    clipMinX = 1,
+                    clipMinY = 33,
+                    clipMaxX = WIDTH - 2,
+                    clipMaxY = 62,
+                )
+            } else if (messageOffset == TEXT_FLED) {
+                val fled = decodeSprite(spriteData, TEXT_FLED, 96, 16)
+                val pokemonName =
+                    decodeSprite(
+                        spriteData,
+                        ROUTE_POKEMON0_NAME + routeSlot * ROUTE_POKEMON_NAME_STRIDE,
+                        80,
+                        16,
+                    )
+
+                fillRect(frame, 0, 32, WIDTH - 1, HEIGHT - 1, palette[0])
+                drawBattleMessageBoxBorder(frame)
+
+                val nameX = leftAlignedSpriteDstX(pokemonName, 80, 16, innerLeft = 1, innerRight = 87)
+                blitClipped(
+                    dst = frame,
+                    src = pokemonName,
+                    srcWidth = 80,
+                    srcHeight = 16,
+                    dstX = nameX,
+                    dstY = 33,
+                    clipMinX = 1,
+                    clipMinY = 33,
+                    clipMaxX = WIDTH - 2,
+                    clipMaxY = 62,
+                )
+
+                val fledX = leftAlignedSpriteDstX(fled, 96, 16, innerLeft = 1, innerRight = WIDTH - 2)
+                blitClipped(
+                    dst = frame,
+                    src = fled,
+                    srcWidth = 96,
+                    srcHeight = 16,
+                    dstX = fledX,
+                    dstY = 48,
+                    clipMinX = 1,
+                    clipMinY = 33,
+                    clipMaxX = WIDTH - 2,
+                    clipMaxY = 62,
                 )
             } else {
                 val message = decodeSprite(spriteData, messageOffset, 96, 16)
-                drawBottomMessageBox(frame = frame, messageSprite = message, clipToInner = true)
+                drawBottomMessageBox(frame = frame, messageSprite = message, clipToInner = false)
             }
         }
 
@@ -596,37 +799,32 @@ object DeviceLcdRenderer {
     ): LcdPreviewFrame {
         val frame = IntArray(WIDTH * HEIGHT) { palette[0] }
 
+        val switchText = decodeSprite(spriteData, TEXT_SWITCH, 80, 16)
         val arrowReturn = decodeSprite(spriteData, ARROW_RETURN, 8, 16)
-        val arrowRight = decodeSprite(spriteData, ARROW_8_RIGHT, 8, 8)
         val arrowUp = decodeSprite(spriteData, ARROW_8_UP, 8, 8)
         val pokeball = decodeSprite(spriteData, POKEBALL_8, 8, 8)
 
         fillRect(frame, 0, 0, WIDTH - 1, 16, palette[0])
+        blit(frame, switchText, 80, 16, 8, 0)
         blit(frame, arrowReturn, 8, 16, 0, 0)
-        drawTinyWord(frame, "CANCEL", 10, 4, palette[3])
         drawHorizontalLine(frame, y = 16, color = palette[3])
 
-        val selected = state.radarSwapCursor.coerceIn(0, DeviceOffsets.POKEMON_SLOT_COUNT)
-        if (selected == 0) {
-            blit(frame, arrowRight, 8, 8, 8, 4)
-        }
+        val selected = state.radarSwapCursor.coerceIn(0, DeviceOffsets.POKEMON_SLOT_COUNT - 1)
 
         val slotXs = intArrayOf(24, 44, 64)
         for (slot in 0 until DeviceOffsets.POKEMON_SLOT_COUNT) {
             val x = slotXs[slot]
             blit(frame, pokeball, 8, 8, x, 28)
-            if (selected == slot + 1) {
+            if (selected == slot) {
                 blit(frame, arrowUp, 8, 8, x, 36 + selectorBounceOffset(animationFrame))
             }
         }
 
         val selectedRouteSlot =
-            if (selected == 0) {
-                state.radarPendingCatchRouteSlot
-            } else {
-                val species = DeviceBinary.readCaughtPokemonSpecies(eeprom, selected - 1)
-                DeviceBinary.findRouteSlotForSpecies(eeprom, species)
-            }
+            DeviceBinary.findRouteSlotForSpecies(
+                eeprom,
+                DeviceBinary.readCaughtPokemonSpecies(eeprom, selected),
+            )
 
         val selectedName =
             if (selectedRouteSlot != null) {
@@ -650,7 +848,7 @@ object DeviceLcdRenderer {
 
         return LcdPreviewFrame(
             pixels = frame,
-            hasVisualContent = hasNonBackground(arrowReturn) || hasNonBackground(pokeball),
+            hasVisualContent = hasNonBackground(switchText) || hasNonBackground(pokeball),
         )
     }
 
@@ -661,6 +859,10 @@ object DeviceLcdRenderer {
         watts: Int,
         animationFrame: Int,
     ): LcdPreviewFrame {
+        if (state.dowsingMode == DowsingMode.Swap) {
+            return renderDowsingSwap(eeprom, spriteData, state, animationFrame)
+        }
+
         val frame = IntArray(WIDTH * HEIGHT) { palette[0] }
 
         val routeImage = decodeSprite(spriteData, ROUTE_IMAGE, 32, 24)
@@ -672,7 +874,7 @@ object DeviceLcdRenderer {
         val item = decodeSprite(spriteData, ITEM_8, 8, 8)
         val discoverText = decodeSprite(spriteData, TEXT_DISCOVER_ITEM, 96, 16)
         val foundText = decodeSprite(spriteData, TEXT_FOUND, 96, 16)
-        val switchText = decodeSprite(spriteData, TEXT_SWITCH, 96, 16)
+        val switchText = decodeSprite(spriteData, TEXT_SWITCH, 80, 16)
         val noMatchText = decodeSprite(spriteData, TEXT_NOTHING_FOUND, 96, 16)
         val nearText = decodeSprite(spriteData, TEXT_ITS_NEAR, 96, 16)
         val farText = decodeSprite(spriteData, TEXT_ITS_FAR, 96, 16)
@@ -723,8 +925,23 @@ object DeviceLcdRenderer {
             val itemNameOffset = itemIndex?.let { ROUTE_ITEM0_NAME + it * ROUTE_ITEM_NAME_STRIDE }
             val itemName = itemNameOffset?.let { decodeSprite(spriteData, it, 96, 16) } ?: discoverText
             drawLargeMessageLine(frame, itemName, y = 32, centerContent = true)
-            val resultText = if (state.dowsingPendingStored) foundText else switchText
-            drawLargeMessageLine(frame, resultText, y = 48, centerContent = true)
+            if (state.dowsingPendingStored) {
+                drawLargeMessageLine(frame, foundText, y = 48, centerContent = true)
+            } else {
+                val switchX = centeredSpriteDstX(switchText, 80, 16, innerLeft = 1, innerRight = WIDTH - 2)
+                blitClipped(
+                    dst = frame,
+                    src = switchText,
+                    srcWidth = 80,
+                    srcHeight = 16,
+                    dstX = switchX,
+                    dstY = 48,
+                    clipMinX = 1,
+                    clipMinY = 25,
+                    clipMaxX = WIDTH - 2,
+                    clipMaxY = 62,
+                )
+            }
 
             return LcdPreviewFrame(
                 pixels = frame,
@@ -754,6 +971,62 @@ object DeviceLcdRenderer {
         return LcdPreviewFrame(
             pixels = frame,
             hasVisualContent = hasNonBackground(bush) || hasNonBackground(routeImage),
+        )
+    }
+
+    private fun renderDowsingSwap(
+        eeprom: ByteArray,
+        spriteData: ByteArray,
+        state: DeviceInteractionState,
+        animationFrame: Int,
+    ): LcdPreviewFrame {
+        val frame = IntArray(WIDTH * HEIGHT) { palette[0] }
+
+        val switchText = decodeSprite(spriteData, TEXT_SWITCH, 80, 16)
+        val arrowReturn = decodeSprite(spriteData, ARROW_RETURN, 8, 16)
+        val arrowUp = decodeSprite(spriteData, ARROW_8_UP, 8, 8)
+        val itemIcon = decodeSprite(spriteData, ITEM_8, 8, 8)
+
+        fillRect(frame, 0, 0, WIDTH - 1, 16, palette[0])
+        blit(frame, switchText, 80, 16, 8, 0)
+        blit(frame, arrowReturn, 8, 16, 0, 0)
+        drawHorizontalLine(frame, y = 16, color = palette[3])
+
+        val selected = state.dowsingSwapCursor.coerceIn(0, DeviceOffsets.DOWSED_ITEM_COUNT - 1)
+        val slotXs = intArrayOf(24, 44, 64)
+        for (slot in 0 until DeviceOffsets.DOWSED_ITEM_COUNT) {
+            val x = slotXs[slot]
+            blit(frame, itemIcon, 8, 8, x, 28)
+            if (slot == selected) {
+                blit(frame, arrowUp, 8, 8, x, 36 + selectorBounceOffset(animationFrame))
+            }
+        }
+
+        val selectedItemId = DeviceBinary.readDowsedItemId(eeprom, selected)
+        val selectedRouteIndex = DeviceBinary.findRouteItemIndexForItemId(eeprom, selectedItemId)
+        val selectedName =
+            if (selectedRouteIndex != null) {
+                decodeSprite(
+                    spriteData,
+                    ROUTE_ITEM0_NAME + selectedRouteIndex * ROUTE_ITEM_NAME_STRIDE,
+                    96,
+                    16,
+                )
+            } else {
+                decodeSprite(spriteData, TEXT_NOTHING_HELD, 96, 16)
+            }
+
+        drawBottomMessageBox(
+            frame = frame,
+            messageSprite = selectedName,
+            messageWidth = 96,
+            messageX = 0,
+            clipToInner = true,
+        )
+
+        return LcdPreviewFrame(
+            pixels = frame,
+            hasVisualContent = hasNonBackground(switchText) || hasNonBackground(itemIcon),
         )
     }
 
@@ -1114,6 +1387,13 @@ object DeviceLcdRenderer {
         drawVerticalLine(frame, x = WIDTH - 1, color = palette[3], yStart = 24, yEndInclusive = 63)
     }
 
+    private fun drawBattleMessageBoxBorder(frame: IntArray) {
+        drawHorizontalLine(frame, y = 32, color = palette[3])
+        drawHorizontalLine(frame, y = 63, color = palette[3])
+        drawVerticalLine(frame, x = 0, color = palette[3], yStart = 32, yEndInclusive = 63)
+        drawVerticalLine(frame, x = WIDTH - 1, color = palette[3], yStart = 32, yEndInclusive = 63)
+    }
+
     private fun drawLargeMessageLine(
         frame: IntArray,
         messageSprite: IntArray,
@@ -1170,6 +1450,21 @@ object DeviceLcdRenderer {
         val targetLeft = innerLeft + (innerWidth - contentWidth) / 2
         val desiredDstX = targetLeft - contentLeft
         return desiredDstX.coerceIn(minDstX, maxDstX)
+    }
+
+    private fun leftAlignedSpriteDstX(
+        sprite: IntArray,
+        spriteWidth: Int,
+        spriteHeight: Int,
+        innerLeft: Int,
+        innerRight: Int,
+    ): Int {
+        val bounds = stableOpaqueSpriteBounds(sprite, spriteWidth, spriteHeight) ?: return innerLeft
+        val contentLeft = bounds.first
+        val contentRight = bounds.second
+        val minDstX = innerLeft - contentLeft
+        val maxDstX = innerRight - contentRight
+        return minDstX.coerceAtMost(maxDstX)
     }
 
     private fun opaqueSpriteBounds(
@@ -1250,15 +1545,15 @@ object DeviceLcdRenderer {
                 srcWidth = messageWidth,
                 srcHeight = 16,
                 dstX = messageX,
-                dstY = 48,
+                dstY = 49,
                 clipMinX = 1,
                 clipMinY = 49,
                 clipMaxX = WIDTH - 2,
                 clipMaxY = 62,
             )
         } else {
-            fillRect(frame, 0, 48, WIDTH - 1, 63, palette[0])
-            blit(frame, messageSprite, messageWidth, 16, messageX, 48)
+            fillRect(frame, 0, 49, WIDTH - 1, 62, palette[0])
+            blit(frame, messageSprite, messageWidth, 16, messageX, 49)
         }
         drawMessageBoxBorder(frame)
     }
@@ -1501,29 +1796,10 @@ object DeviceLcdRenderer {
         for (index in 0 until maxHp) {
             val x = startX + index * 8
             val filled = index < clampedHp
-
-            for (y in startY until startY + 6) {
-                if (y !in 0 until HEIGHT) {
-                    continue
-                }
-                for (pixelX in x until x + 7) {
-                    if (pixelX !in 0 until WIDTH) {
-                        continue
-                    }
-                    val isBorder = y == startY || y == startY + 5 || pixelX == x || pixelX == x + 6
-                    frame[y * WIDTH + pixelX] =
-                        if (isBorder) {
-                            palette[2]
-                        } else if (filled) {
-                            palette[3]
-                        } else {
-                            palette[0]
-                        }
-                }
-            }
-
             if (filled) {
                 blit(frame, hpBlockSprite, 8, 8, x, startY)
+            } else {
+                fillRect(frame, x, startY, x + 7, startY + 7, palette[0])
             }
         }
     }

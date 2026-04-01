@@ -312,6 +312,30 @@ object DeviceBinary {
         return true
     }
 
+    fun hasFreeDowsedItemSlot(eeprom: ByteArray): Boolean {
+        return firstEmptyDowsedItemSlot(eeprom) != null
+    }
+
+    fun replaceDowsedItemWithRoute(
+        eeprom: ByteArray,
+        dowsedSlot: Int,
+        routeItemIndex: Int,
+    ): Boolean {
+        if (dowsedSlot !in 0 until DeviceOffsets.DOWSED_ITEM_COUNT) {
+            return false
+        }
+
+        val itemId = readRouteItemId(eeprom, routeItemIndex)
+        if (itemId == 0) {
+            return false
+        }
+
+        val offset = DeviceOffsets.DOWSED_ITEMS_OFFSET + dowsedSlot * DeviceOffsets.ITEM_DATA_SIZE
+        writeU16LE(eeprom, offset, itemId)
+        writeU16LE(eeprom, offset + 2, 0)
+        return true
+    }
+
     private fun firstEmptyCaughtSlot(eeprom: ByteArray): Int? {
         for (slot in 0 until DeviceOffsets.POKEMON_SLOT_COUNT) {
             if (readCaughtPokemonSpecies(eeprom, slot) == 0) {
