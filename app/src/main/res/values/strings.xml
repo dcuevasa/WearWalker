@@ -1,0 +1,27 @@
+<resources>
+    <string name="app_name">WearWalker</string>
+    <string name="status_loading">Loading emulator...</string>
+    <string name="status_ready">Ready</string>
+    <string name="status_error">Error</string>
+    <string name="steps_label">Steps</string>
+    <string name="watts_label">Watts</string>
+    <string name="trainer_label">Trainer</string>
+    <string name="flags_label">Flags</string>
+    <string name="mirror_label">Mirror</string>
+    <string name="btn_add_steps">Add 100 steps</string>
+    <string name="btn_add_watts">Add 10 watts</string>
+    <string name="btn_save">Save EEPROM</string>
+    <string name="btn_refresh_status">Refresh status</string>
+    <string name="btn_left">LEFT</string>
+    <string name="btn_enter">ENTER</string>
+    <string name="btn_right">RIGHT</string>
+    <string name="btn_left_short">L</string>
+    <string name="btn_enter_short">E</string>
+    <string name="btn_right_short">R</string>
+    <string name="btn_open_debug_settings">Debug / Settings</string>
+    <string name="btn_settings_gear">⚙</string>
+    <string name="btn_back_to_emulator">Back to emulator</string>
+    <string name="required_assets_missing_short">Copy eeprom.bin to /data/data/com.example.wearwalker/files/</string>
+    <string name="mirror_in_sync">in sync</string>
+    <string name="mirror_out_of_sync">out of sync</string>
+</resources>
