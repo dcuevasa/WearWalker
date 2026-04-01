@@ -56,6 +56,7 @@ object DeviceLcdRenderer {
     internal const val SETTINGS_SOUND_OFF = 0x17D0
     internal const val SETTINGS_SOUND_LOW = 0x1830
     internal const val SETTINGS_SOUND_HIGH = 0x1890
+    internal const val SETTINGS_CONTRAST_BAR = 0x18F0
 
     internal const val CHEST_LARGE = 0x1910
 
@@ -99,6 +100,8 @@ object DeviceLcdRenderer {
     internal const val CARD_TRAINER_NAME = 0x1250
     internal const val CARD_ROUTE_ICON = 0x1390
     internal const val CARD_STEPS_TEXT = 0x13D0
+    internal const val CARD_TIME_TEXT = 0x1470
+    internal const val CARD_DAYS_TEXT = 0x14F0
     internal const val CARD_TOTAL_DAYS_TEXT = 0x1590
 
     internal const val ROUTE_IMAGE = DeviceOffsets.AREA_SPRITE_OFFSET
@@ -130,7 +133,7 @@ object DeviceLcdRenderer {
             DeviceScreen.Connect -> renderConnect(spriteData)
             DeviceScreen.Card -> renderCard(eeprom, spriteData, state, animationFrame)
             DeviceScreen.Pokemon -> renderPokemon(eeprom, spriteData, state, animationFrame)
-            DeviceScreen.Settings -> renderSettings(spriteData, state)
+            DeviceScreen.Settings -> renderSettings(spriteData, state, animationFrame)
         }
     }
 
@@ -229,8 +232,9 @@ object DeviceLcdRenderer {
     internal fun renderSettings(
         spriteData: ByteArray,
         state: DeviceInteractionState,
+        animationFrame: Int,
     ): LcdPreviewFrame {
-        return SettingsViewRenderer.render(spriteData, state)
+        return SettingsViewRenderer.render(spriteData, state, animationFrame)
     }
 
     internal fun menuTitleOffset(item: DeviceMenuItem): Int {

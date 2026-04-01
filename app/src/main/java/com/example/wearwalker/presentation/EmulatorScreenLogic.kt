@@ -126,13 +126,13 @@ internal fun buildActionHintForScreen(
         }
 
         DeviceScreen.Connect -> "ENTER: return menu"
-        DeviceScreen.Card -> "LEFT/RIGHT switch pages, ENTER: return menu"
+        DeviceScreen.Card -> "RIGHT: older day, LEFT: newer day (at page 1 exits), ENTER: return menu"
         DeviceScreen.Pokemon -> "LEFT: previous (first exits), RIGHT: next, ENTER: return menu"
         DeviceScreen.Settings ->
             when (state.settingsMode) {
-                DeviceSettingsMode.SelectField -> "LEFT/RIGHT choose Sound or Shade, ENTER"
-                DeviceSettingsMode.AdjustSound -> "LEFT/RIGHT volume level, ENTER confirm and exit"
-                DeviceSettingsMode.AdjustShade -> "LEFT/RIGHT shade slider, ENTER confirm and exit"
+                DeviceSettingsMode.SelectField -> "LEFT at Sound: back, RIGHT: move selector, ENTER: adjust"
+                DeviceSettingsMode.AdjustSound -> "LEFT/RIGHT volume level, ENTER confirm and return Home"
+                DeviceSettingsMode.AdjustShade -> "LEFT/RIGHT shade level (10 steps), ENTER confirm and return Home"
             }
     }
 }
@@ -150,7 +150,7 @@ internal fun countPokemonEntriesFromEeprom(eeprom: ByteArray): Int {
 }
 
 internal fun maxCardPageIndexFromEeprom(eeprom: ByteArray): Int {
-    return DeviceBinary.stepHistoryCount(eeprom).coerceAtLeast(0)
+    return DeviceOffsets.STEP_HISTORY_DAYS
 }
 
 internal fun previousSettingsFieldValue(field: DeviceSettingsField): DeviceSettingsField {

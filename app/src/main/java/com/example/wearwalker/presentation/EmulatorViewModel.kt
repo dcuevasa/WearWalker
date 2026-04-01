@@ -128,6 +128,7 @@ class EmulatorViewModel(
     init {
         loadFromStorage()
         startAnimationLoop()
+        startClockRefreshLoop()
     }
 
     fun loadFromStorage() {
@@ -280,7 +281,7 @@ class EmulatorViewModel(
                         interactionState.copy(pokemonIndex = interactionState.pokemonIndex - 1)
                     }
                 DeviceScreen.Settings ->
-                    onLeftInSettings().copy(settingsIdleTicksRemaining = randomSettingsIdleTicks())
+                    onLeftInSettings()
             }
         refreshState("LEFT action.")
     }
@@ -366,7 +367,7 @@ class EmulatorViewModel(
                         pokemonIndex = (interactionState.pokemonIndex + 1).coerceAtMost(pokemonEntryCount() - 1),
                     )
                 DeviceScreen.Settings ->
-                    onRightInSettings().copy(settingsIdleTicksRemaining = randomSettingsIdleTicks())
+                    onRightInSettings()
             }
         refreshState("RIGHT action.")
     }
@@ -621,7 +622,7 @@ class EmulatorViewModel(
                         screen = DeviceScreen.Settings,
                         settingsField = DeviceSettingsField.Sound,
                         settingsMode = DeviceSettingsMode.SelectField,
-                        settingsIdleTicksRemaining = randomSettingsIdleTicks(),
+                        settingsIdleTicksRemaining = 0,
                     )
                 refreshState("Opened settings.")
             }
@@ -631,7 +632,19 @@ class EmulatorViewModel(
     private fun onLeftInSettings(): DeviceInteractionState {
         return when (interactionState.settingsMode) {
             DeviceSettingsMode.SelectField ->
-                interactionState.copy(settingsField = previousSettingsField(interactionState.settingsField))
+                when (interactionState.settingsField) {
+                    DeviceSettingsField.Sound ->
+                        interactionState.copy(
+                            screen = DeviceScreen.Menu,
+                            menuIndex = DeviceMenuItem.Settings.ordinal,
+                            menuIdleTicksRemaining = randomMenuIdleTicks(),
+                            settingsMode = DeviceSettingsMode.SelectField,
+                            settingsIdleTicksRemaining = 0,
+                        )
+
+                    DeviceSettingsField.Shade ->
+                        interactionState.copy(settingsField = DeviceSettingsField.Sound)
+                }
             DeviceSettingsMode.AdjustSound ->
                 interactionState.copy(soundLevel = (interactionState.soundLevel - 1).coerceAtLeast(0))
             DeviceSettingsMode.AdjustShade ->
@@ -642,57 +655,54 @@ class EmulatorViewModel(
     private fun onRightInSettings(): DeviceInteractionState {
         return when (interactionState.settingsMode) {
             DeviceSettingsMode.SelectField ->
-                interactionState.copy(settingsField = nextSettingsField(interactionState.settingsField))
+                when (interactionState.settingsField) {
+                    DeviceSettingsField.Sound ->
+                        interactionState.copy(settingsField = DeviceSettingsField.Shade)
+
+                    DeviceSettingsField.Shade -> interactionState
+                }
             DeviceSettingsMode.AdjustSound ->
                 interactionState.copy(soundLevel = (interactionState.soundLevel + 1).coerceAtMost(2))
             DeviceSettingsMode.AdjustShade ->
-                interactionState.copy(shadeLevel = (interactionState.shadeLevel + 1).coerceAtMost(3))
+                interactionState.copy(shadeLevel = (interactionState.shadeLevel + 1).coerceAtMost(9))
         }
     }
 
     private fun onEnterInSettings() {
-        interactionState =
+        val (nextState, status) =
             when (interactionState.settingsMode) {
                 DeviceSettingsMode.SelectField -> {
                     when (interactionState.settingsField) {
                         DeviceSettingsField.Sound ->
                             interactionState.copy(
                                 settingsMode = DeviceSettingsMode.AdjustSound,
-                                settingsIdleTicksRemaining = randomSettingsIdleTicks(),
-                            )
+                                settingsIdleTicksRemaining = 0,
+                            ) to "Settings: adjust sound."
+
                         DeviceSettingsField.Shade ->
                             interactionState.copy(
                                 settingsMode = DeviceSettingsMode.AdjustShade,
-                                settingsIdleTicksRemaining = randomSettingsIdleTicks(),
-                            )
+                                settingsIdleTicksRemaining = 0,
+                            ) to "Settings: adjust shade."
                     }
                 }
+
                 DeviceSettingsMode.AdjustSound ->
                     interactionState.copy(
-                        screen = DeviceScreen.Menu,
+                        screen = DeviceScreen.Home,
                         settingsMode = DeviceSettingsMode.SelectField,
-                        menuIdleTicksRemaining = randomMenuIdleTicks(),
                         settingsIdleTicksRemaining = 0,
-                    )
+                    ) to "Sound updated. Returning Home."
+
                 DeviceSettingsMode.AdjustShade ->
                     interactionState.copy(
-                        screen = DeviceScreen.Menu,
+                        screen = DeviceScreen.Home,
                         settingsMode = DeviceSettingsMode.SelectField,
-                        menuIdleTicksRemaining = randomMenuIdleTicks(),
                         settingsIdleTicksRemaining = 0,
-                    )
+                    ) to "Shade updated. Returning Home."
             }
 
-        val status =
-            when (interactionState.screen) {
-                DeviceScreen.Menu -> "Settings confirmed: returning to menu."
-                else ->
-                    when (interactionState.settingsMode) {
-                        DeviceSettingsMode.SelectField -> "Settings: select Sound or Shade."
-                        DeviceSettingsMode.AdjustSound -> "Settings: adjust sound."
-                        DeviceSettingsMode.AdjustShade -> "Settings: adjust shade."
-                    }
-            }
+        interactionState = nextState
         refreshState(status)
     }
 
@@ -1245,6 +1255,20 @@ class EmulatorViewModel(
         }
     }
 
+    private fun startClockRefreshLoop() {
+        viewModelScope.launch {
+            while (isActive) {
+                delay(1000)
+                val shouldRefreshClock =
+                    interactionState.screen == DeviceScreen.Card &&
+                        interactionState.cardPageIndex == 0
+                if (shouldRefreshClock && engine != null) {
+                    refreshState()
+                }
+            }
+        }
+    }
+
     private fun tickInteractionState() {
         interactionState =
             when (interactionState.screen) {
@@ -1341,17 +1365,7 @@ class EmulatorViewModel(
                     }
                 }
                 DeviceScreen.Settings -> {
-                    val nextTicks = interactionState.settingsIdleTicksRemaining - 1
-                    if (nextTicks <= 0) {
-                        interactionState.copy(
-                            screen = DeviceScreen.Menu,
-                            settingsMode = DeviceSettingsMode.SelectField,
-                            menuIdleTicksRemaining = randomMenuIdleTicks(),
-                            settingsIdleTicksRemaining = 0,
-                        )
-                    } else {
-                        interactionState.copy(settingsIdleTicksRemaining = nextTicks)
-                    }
+                    interactionState
                 }
                 else -> interactionState
             }
