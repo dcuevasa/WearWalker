@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.wearwalker.wearwalker.bridge.BridgeHttpServer
+import com.wearwalker.wearwalker.bridge.BridgeProtocolHandler
 import com.wearwalker.wearwalker.core.DowsingFeedback
 import com.wearwalker.wearwalker.core.DowsingMode
 import com.wearwalker.wearwalker.core.HomeEventType
@@ -79,6 +81,8 @@ class EmulatorViewModel(
     private val eepromStorage: EepromStorage,
 ) : ViewModel() {
     companion object {
+        private const val BRIDGE_PORT = 39231
+
         private const val RADAR_COST_WATTS = 10
         private const val DOWSING_COST_WATTS = 3
         private const val DOWSING_ATTEMPTS = 2
@@ -143,6 +147,8 @@ class EmulatorViewModel(
     private var sensorFlushJob: Job? = null
     private var activityRecognitionGranted = false
     private var pedometerStatus = "Pedometer paused: waiting for permission."
+    private var bridgeServer: BridgeHttpServer? = null
+    private var bridgeStatusMessage: String = "Wi-Fi bridge offline"
 
     init {
         loadFromStorage()
@@ -191,6 +197,7 @@ class EmulatorViewModel(
                         }
                     }
 
+                startBridgeIfNeeded()
                 refreshState(eepromStatus)
                 reconcilePedometerStateAfterLoad()
                 if (activityRecognitionGranted) {
@@ -1440,6 +1447,7 @@ class EmulatorViewModel(
                 statusMessage = message,
                 snapshot = snapshot,
                 validation = validation,
+                bridgeStatus = bridgeStatusMessage,
                 eepromSource = eepromSource,
                 eepromPath = eepromInfo.absolutePath,
                 eepromExists = eepromInfo.exists,
@@ -1463,6 +1471,37 @@ class EmulatorViewModel(
                 foundItemCount = foundItemsCount,
                 totalActions = totalActions,
             )
+    }
+
+    private fun startBridgeIfNeeded() {
+        if (bridgeServer != null) {
+            return
+        }
+
+        val handler =
+            BridgeProtocolHandler(
+                eepromStorage = eepromStorage,
+                getEngine = { engine },
+                onStateRefreshed = { message -> refreshState(message) },
+            )
+
+        bridgeStatusMessage = "Wi-Fi bridge starting on port $BRIDGE_PORT"
+
+        val server =
+            BridgeHttpServer(
+                port = BRIDGE_PORT,
+                scope = viewModelScope,
+                requestHandler = { request -> handler.handle(request) },
+                onStatusChanged = { status ->
+                    bridgeStatusMessage = status
+                    if (engine != null) {
+                        refreshState()
+                    }
+                },
+            )
+
+        bridgeServer = server
+        server.start()
     }
 
     private fun ensureRequiredAssets(): Boolean {
@@ -1777,6 +1816,9 @@ class EmulatorViewModel(
     }
 
     override fun onCleared() {
+        bridgeServer?.stop()
+        bridgeServer = null
+        bridgeStatusMessage = "Wi-Fi bridge offline"
         buttonSoundPlayer.release()
         sensorFlushJob?.cancel()
         stepCounterMonitor.stop()

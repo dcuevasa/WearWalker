@@ -175,18 +175,24 @@ class EepromStorage(
     fun getManualEepromPaths(): List<String> {
         val packageName = context.packageName
         val internalPath = internalEepromPath()
-        val primaryExternalPath = "/storage/self/primary/Android/data/$packageName/files/$EEPROM_FILE_NAME"
-        val emulatedExternalPath = "/storage/emulated/0/Android/data/$packageName/files/$EEPROM_FILE_NAME"
+        val preferredSdcardPath = "/sdcard/Android/data/$packageName/$EEPROM_FILE_NAME"
+        val emulatedPreferredPath = "/storage/emulated/0/Android/data/$packageName/$EEPROM_FILE_NAME"
+        val primaryPreferredPath = "/storage/self/primary/Android/data/$packageName/$EEPROM_FILE_NAME"
         val sdcardExternalPath = "/sdcard/Android/data/$packageName/files/$EEPROM_FILE_NAME"
+        val emulatedExternalPath = "/storage/emulated/0/Android/data/$packageName/files/$EEPROM_FILE_NAME"
+        val primaryExternalPath = "/storage/self/primary/Android/data/$packageName/files/$EEPROM_FILE_NAME"
         val contextExternalPath =
             context.getExternalFilesDir(null)?.resolve(EEPROM_FILE_NAME)?.absolutePath
 
         return listOfNotNull(
-            internalPath,
-            primaryExternalPath,
-            emulatedExternalPath,
+            preferredSdcardPath,
+            emulatedPreferredPath,
+            primaryPreferredPath,
             sdcardExternalPath,
+            emulatedExternalPath,
+            primaryExternalPath,
             contextExternalPath,
+            internalPath,
         ).distinct()
     }
 
