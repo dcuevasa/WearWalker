@@ -3,6 +3,8 @@ package com.wearwalker.wearwalker.presentation
 import android.content.pm.ApplicationInfo
 import android.graphics.Bitmap
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,6 +20,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -28,6 +31,7 @@ import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.wear.compose.foundation.lazy.ScalingLazyColumn
@@ -53,6 +57,9 @@ fun EmulatorScreen(
     onEnterAction: () -> Unit,
     onRightAction: () -> Unit,
 ) {
+    val isConnectScreen = uiState.lcdSceneLabel == "Connect"
+    KeepScreenOnEffect(enabled = isConnectScreen)
+
     val debugControlsEnabled =
         (LocalContext.current.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
     var showDebugView by rememberSaveable { mutableStateOf(false) }
@@ -80,6 +87,19 @@ fun EmulatorScreen(
 }
 
 @Composable
+private fun KeepScreenOnEffect(enabled: Boolean) {
+    val view = LocalView.current
+
+    DisposableEffect(view, enabled) {
+        val previous = view.keepScreenOn
+        view.keepScreenOn = enabled
+        onDispose {
+            view.keepScreenOn = previous
+        }
+    }
+}
+
+@Composable
 private fun EmulatorMainScreen(
     uiState: EmulatorUiState,
     onLeftAction: () -> Unit,
@@ -88,6 +108,8 @@ private fun EmulatorMainScreen(
     showDebugButton: Boolean,
     onOpenDebug: () -> Unit,
 ) {
+    val isConnectScreen = uiState.lcdSceneLabel == "Connect"
+
     Box(
         modifier =
             Modifier
@@ -97,8 +119,10 @@ private fun EmulatorMainScreen(
         Column(
             modifier =
                 Modifier
-                    .align(Alignment.Center)
-                    .padding(top = 10.dp),
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(top = 10.dp, bottom = 10.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             LcdPreview(
@@ -147,6 +171,36 @@ private fun EmulatorMainScreen(
                     text = stringResource(R.string.required_assets_missing_short),
                     style = MaterialTheme.typography.caption3,
                 )
+            }
+
+            if (isConnectScreen) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = uiState.bridgeStatus,
+                    style = MaterialTheme.typography.caption3,
+                )
+                Text(
+                    text = uiState.bridgeDetail,
+                    style = MaterialTheme.typography.caption3,
+                )
+                if (uiState.bridgeLastError.isNotBlank()) {
+                    Text(
+                        text = "Error: ${uiState.bridgeLastError}",
+                        style = MaterialTheme.typography.caption3,
+                    )
+                }
+
+                if (uiState.bridgeEvents.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    uiState.bridgeEvents.forEach { line ->
+                        Text(
+                            text = line,
+                            style = MaterialTheme.typography.caption3,
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
             }
         }
     }

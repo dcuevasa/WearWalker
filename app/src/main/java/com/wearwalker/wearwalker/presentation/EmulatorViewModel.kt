@@ -38,6 +38,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.LocalDate
+import java.time.LocalTime
 import java.time.ZoneId
 import java.time.temporal.ChronoUnit
 import kotlin.math.abs
@@ -57,6 +58,9 @@ data class EmulatorUiState(
     val snapshot: DeviceSnapshot? = null,
     val validation: EepromValidationReport? = null,
     val bridgeStatus: String = "IR disabled. Wi-Fi bridge protocol planned.",
+    val bridgeDetail: String = "No bridge activity yet.",
+    val bridgeLastError: String = "",
+    val bridgeEvents: List<String> = emptyList(),
     val eepromSource: String = "Unknown",
     val eepromPath: String = "",
     val eepromExists: Boolean = false,
@@ -81,7 +85,9 @@ class EmulatorViewModel(
     private val eepromStorage: EepromStorage,
 ) : ViewModel() {
     companion object {
-        private const val BRIDGE_PORT = 39231
+        private const val BRIDGE_PORT = 8080
+        private const val BRIDGE_EVENT_HISTORY_LIMIT = 14
+        private const val BRIDGE_KEEPALIVE_MS = 20000L
 
         private const val RADAR_COST_WATTS = 10
         private const val DOWSING_COST_WATTS = 3
@@ -149,6 +155,11 @@ class EmulatorViewModel(
     private var pedometerStatus = "Pedometer paused: waiting for permission."
     private var bridgeServer: BridgeHttpServer? = null
     private var bridgeStatusMessage: String = "Wi-Fi bridge offline"
+    private var bridgeActivityMessage: String = "Waiting for requests."
+    private var bridgeLastErrorMessage: String = ""
+    private var bridgeKeepAliveUntilMs: Long = 0L
+    private val bridgeEventHistory = mutableListOf<String>()
+    private var lastObservedLocalDate: LocalDate = LocalDate.now(ZoneId.systemDefault())
 
     init {
         loadFromStorage()
@@ -197,7 +208,6 @@ class EmulatorViewModel(
                         }
                     }
 
-                startBridgeIfNeeded()
                 refreshState(eepromStatus)
                 reconcilePedometerStateAfterLoad()
                 if (activityRecognitionGranted) {
@@ -673,12 +683,7 @@ class EmulatorViewModel(
             return
         }
 
-        val rolledDays = applyDailyRolloverIfNeeded(currentEngine)
-        if (rolledDays > 0) {
-            currentEngine.setLastSyncNow(Instant.now().epochSecond)
-            eepromStorage.save(currentEngine.exportEeprom())
-            refreshState("Applied $rolledDays daily rollover(s) at local midnight.")
-        }
+        applyDailyRolloverAndPersistIfNeeded(currentEngine)
     }
 
     private suspend fun flushPendingStepDeltaIfNeeded(successMessage: String): Boolean {
@@ -781,6 +786,18 @@ class EmulatorViewModel(
         val rolloverResult = currentEngine.applyDailyRollover(elapsedDays)
         stepTrackingStore.writeLastRolloverDate(today)
         return rolloverResult.rolledDays
+    }
+
+    private suspend fun applyDailyRolloverAndPersistIfNeeded(currentEngine: DeviceEngine): Int {
+        val rolledDays = applyDailyRolloverIfNeeded(currentEngine)
+        if (rolledDays <= 0) {
+            return 0
+        }
+
+        currentEngine.setLastSyncNow(Instant.now().epochSecond)
+        eepromStorage.save(currentEngine.exportEeprom())
+        refreshState("Applied $rolledDays daily rollover(s) at local midnight.")
+        return rolledDays
     }
 
     private fun onEnterFromMenu() {
@@ -1404,6 +1421,8 @@ class EmulatorViewModel(
     }
 
     private fun refreshState(statusMessage: String? = null) {
+        syncBridgeLifecycleForCurrentScreen()
+
         val currentEngine = engine ?: return
         val eeprom = currentEngine.exportEeprom()
         val validation = EepromValidator.validate(eeprom)
@@ -1448,6 +1467,9 @@ class EmulatorViewModel(
                 snapshot = snapshot,
                 validation = validation,
                 bridgeStatus = bridgeStatusMessage,
+                bridgeDetail = bridgeActivityMessage,
+                bridgeLastError = bridgeLastErrorMessage,
+                bridgeEvents = bridgeEventHistory.toList(),
                 eepromSource = eepromSource,
                 eepromPath = eepromInfo.absolutePath,
                 eepromExists = eepromInfo.exists,
@@ -1473,6 +1495,28 @@ class EmulatorViewModel(
             )
     }
 
+    private fun appendBridgeEvent(
+        message: String,
+        isError: Boolean,
+    ) {
+        val trimmed = message.trim().ifEmpty { "Bridge event" }
+        val timestamp = LocalTime.now().withNano(0).toString()
+        val prefix = if (isError) "ERR" else "OK"
+
+        bridgeActivityMessage = trimmed
+        if (isError) {
+            bridgeLastErrorMessage = trimmed
+        }
+        if (trimmed.startsWith("Request:")) {
+            bridgeKeepAliveUntilMs = System.currentTimeMillis() + BRIDGE_KEEPALIVE_MS
+        }
+
+        bridgeEventHistory.add("$timestamp [$prefix] $trimmed")
+        while (bridgeEventHistory.size > BRIDGE_EVENT_HISTORY_LIMIT) {
+            bridgeEventHistory.removeAt(0)
+        }
+    }
+
     private fun startBridgeIfNeeded() {
         if (bridgeServer != null) {
             return
@@ -1483,9 +1527,18 @@ class EmulatorViewModel(
                 eepromStorage = eepromStorage,
                 getEngine = { engine },
                 onStateRefreshed = { message -> refreshState(message) },
+                onBridgeEvent = { message, isError ->
+                    appendBridgeEvent(message, isError)
+                    if (engine != null && (interactionState.screen == DeviceScreen.Connect || bridgeServer != null)) {
+                        refreshState()
+                    }
+                },
             )
 
         bridgeStatusMessage = "Wi-Fi bridge starting on port $BRIDGE_PORT"
+        bridgeActivityMessage = "Starting bridge server..."
+        bridgeLastErrorMessage = ""
+        appendBridgeEvent("Starting bridge server on port $BRIDGE_PORT", false)
 
         val server =
             BridgeHttpServer(
@@ -1494,7 +1547,17 @@ class EmulatorViewModel(
                 requestHandler = { request -> handler.handle(request) },
                 onStatusChanged = { status ->
                     bridgeStatusMessage = status
-                    if (engine != null) {
+                    val failed = status.contains("failed", ignoreCase = true)
+                    appendBridgeEvent(status, failed)
+
+                    if (status.contains("listening", ignoreCase = true)) {
+                        bridgeLastErrorMessage = ""
+                        bridgeActivityMessage = "Bridge ready. Waiting for 3DS requests."
+                    }
+                    if (status.contains("offline", ignoreCase = true) && interactionState.screen != DeviceScreen.Connect) {
+                        bridgeActivityMessage = "Bridge stopped outside Connect screen."
+                    }
+                    if (engine != null && interactionState.screen == DeviceScreen.Connect) {
                         refreshState()
                     }
                 },
@@ -1502,6 +1565,33 @@ class EmulatorViewModel(
 
         bridgeServer = server
         server.start()
+    }
+
+    private fun stopBridgeIfRunning() {
+        if (bridgeServer == null) {
+            return
+        }
+        bridgeServer?.stop()
+        bridgeServer = null
+        bridgeStatusMessage = "Wi-Fi bridge offline"
+        bridgeActivityMessage = "Bridge stopped. Open Connect to listen again."
+        appendBridgeEvent("Bridge stopped. Open Connect to listen again.", false)
+    }
+
+    private fun syncBridgeLifecycleForCurrentScreen() {
+        val now = System.currentTimeMillis()
+        val keepAliveActive = bridgeServer != null && now < bridgeKeepAliveUntilMs
+        val shouldRunBridge = engine != null && (interactionState.screen == DeviceScreen.Connect || keepAliveActive)
+
+        if (keepAliveActive && interactionState.screen != DeviceScreen.Connect) {
+            bridgeActivityMessage = "Bridge finishing active transfer..."
+        }
+
+        if (shouldRunBridge) {
+            startBridgeIfNeeded()
+        } else {
+            stopBridgeIfRunning()
+        }
     }
 
     private fun ensureRequiredAssets(): Boolean {
@@ -1574,6 +1664,16 @@ class EmulatorViewModel(
         viewModelScope.launch {
             while (isActive) {
                 delay(1000)
+
+                val today = LocalDate.now(ZoneId.systemDefault())
+                if (today != lastObservedLocalDate) {
+                    lastObservedLocalDate = today
+                    val currentEngine = engine
+                    if (currentEngine != null) {
+                        applyDailyRolloverAndPersistIfNeeded(currentEngine)
+                    }
+                }
+
                 val shouldRefreshClock =
                     interactionState.screen == DeviceScreen.Card &&
                         interactionState.cardPageIndex == 0
@@ -1816,9 +1916,7 @@ class EmulatorViewModel(
     }
 
     override fun onCleared() {
-        bridgeServer?.stop()
-        bridgeServer = null
-        bridgeStatusMessage = "Wi-Fi bridge offline"
+        stopBridgeIfRunning()
         buttonSoundPlayer.release()
         sensorFlushJob?.cancel()
         stepCounterMonitor.stop()

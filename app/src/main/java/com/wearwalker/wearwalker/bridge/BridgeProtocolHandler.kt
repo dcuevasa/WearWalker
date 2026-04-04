@@ -10,7 +10,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.nio.charset.StandardCharsets
 import java.time.Instant
-import kotlin.math.min
 
 private class BridgeProtocolException(
     val statusCode: Int,
@@ -23,12 +22,26 @@ private data class SpritePatchRegion(
     val size: Int,
 )
 
+private data class CapturePlacement(
+    val slot: Int,
+    val speciesId: Int,
+    val level: Int,
+)
+
 class BridgeProtocolHandler(
     private val eepromStorage: EepromStorage,
     private val getEngine: () -> DeviceEngine?,
     private val onStateRefreshed: (String) -> Unit,
+    private val onBridgeEvent: (String, Boolean) -> Unit = { _, _ -> },
 ) {
     companion object {
+        private const val IDENTITY_TRAINER_TID_OFFSET = DeviceOffsets.IDENTITY_OFFSET + 12
+        private const val IDENTITY_TRAINER_SID_OFFSET = DeviceOffsets.IDENTITY_OFFSET + 14
+        private const val IDENTITY_UNIQ_OFFSET = DeviceOffsets.IDENTITY_OFFSET + 16
+        private const val IDENTITY_UNIQ_SIZE = 40
+
+        private const val TEAM_UNIQ_OFFSET = DeviceOffsets.TEAM_OFFSET + 8
+        private const val TEAM_UNIQ_SIZE = 40
         private const val TEAM_TRAINER_TID_OFFSET = DeviceOffsets.TEAM_OFFSET + 48
         private const val TEAM_TRAINER_SID_OFFSET = DeviceOffsets.TEAM_OFFSET + 50
         private const val TEAM_TRAINER_NAME_OFFSET = DeviceOffsets.TEAM_OFFSET + 56
@@ -37,11 +50,22 @@ class BridgeProtocolHandler(
         private const val TEAM_COMPANION_SIZE = 56
         private const val TEAM_COMPANION_COUNT = 6
         private const val TEAM_COMPANION_SPECIES_OFFSET = 0
+        private const val TEAM_COMPANION_HELD_ITEM_OFFSET = 2
+        private const val TEAM_COMPANION_MOVES_OFFSET = 4
+        private const val TEAM_COMPANION_OT_TID_OFFSET = 12
+        private const val TEAM_COMPANION_OT_SID_OFFSET = 14
+        private const val TEAM_COMPANION_VARIANT_OFFSET = 30
+        private const val TEAM_COMPANION_HAPPINESS_OFFSET = 33
+        private const val TEAM_COMPANION_LEVEL_OFFSET = 34
+        private const val TEAM_COMPANION_NICKNAME_OFFSET = 36
+        private const val TEAM_COMPANION_NICKNAME_CHARS = 10
 
         private const val ROUTE_WALKING_SUMMARY_OFFSET = DeviceOffsets.ROUTE_INFO_OFFSET
         private const val ROUTE_NICKNAME_OFFSET = DeviceOffsets.ROUTE_INFO_OFFSET + 16
         private const val ROUTE_NICKNAME_CHARS = 11
         private const val ROUTE_IMAGE_INDEX_OFFSET = DeviceOffsets.ROUTE_INFO_OFFSET + 39
+        private const val ROUTE_NAME_OFFSET = DeviceOffsets.ROUTE_INFO_OFFSET + 40
+        private const val ROUTE_NAME_CHARS = 21
 
         private const val ROUTE_COMPANION_MIN_STEPS_OFFSET = DeviceOffsets.ROUTE_INFO_OFFSET + 0x82
         private const val ROUTE_COMPANION_CHANCE_OFFSET = DeviceOffsets.ROUTE_INFO_OFFSET + 0x88
@@ -84,25 +108,80 @@ class BridgeProtocolHandler(
                 "routePoke2Name" to
                     SpritePatchRegion(offset = DeviceOffsets.ROUTE_COMPANION_NAME_SPRITES_OFFSET + 0x280, size = 0x140),
                 "routeItem0Name" to
-                    SpritePatchRegion(offset = DeviceOffsets.ROUTE_ITEM_NAME_SPRITES_OFFSET + 0x000, size = 0x140),
+                    SpritePatchRegion(offset = DeviceOffsets.ROUTE_ITEM_NAME_SPRITES_OFFSET + 0x000, size = 0x180),
                 "routeItem1Name" to
-                    SpritePatchRegion(offset = DeviceOffsets.ROUTE_ITEM_NAME_SPRITES_OFFSET + 0x180, size = 0x140),
+                    SpritePatchRegion(offset = DeviceOffsets.ROUTE_ITEM_NAME_SPRITES_OFFSET + 0x180, size = 0x180),
                 "routeItem2Name" to
-                    SpritePatchRegion(offset = DeviceOffsets.ROUTE_ITEM_NAME_SPRITES_OFFSET + 0x300, size = 0x140),
+                    SpritePatchRegion(offset = DeviceOffsets.ROUTE_ITEM_NAME_SPRITES_OFFSET + 0x300, size = 0x180),
                 "routeItem3Name" to
-                    SpritePatchRegion(offset = DeviceOffsets.ROUTE_ITEM_NAME_SPRITES_OFFSET + 0x480, size = 0x140),
+                    SpritePatchRegion(offset = DeviceOffsets.ROUTE_ITEM_NAME_SPRITES_OFFSET + 0x480, size = 0x180),
                 "routeItem4Name" to
-                    SpritePatchRegion(offset = DeviceOffsets.ROUTE_ITEM_NAME_SPRITES_OFFSET + 0x600, size = 0x140),
+                    SpritePatchRegion(offset = DeviceOffsets.ROUTE_ITEM_NAME_SPRITES_OFFSET + 0x600, size = 0x180),
                 "routeItem5Name" to
-                    SpritePatchRegion(offset = DeviceOffsets.ROUTE_ITEM_NAME_SPRITES_OFFSET + 0x780, size = 0x140),
+                    SpritePatchRegion(offset = DeviceOffsets.ROUTE_ITEM_NAME_SPRITES_OFFSET + 0x780, size = 0x180),
                 "routeItem6Name" to
-                    SpritePatchRegion(offset = DeviceOffsets.ROUTE_ITEM_NAME_SPRITES_OFFSET + 0x900, size = 0x140),
+                    SpritePatchRegion(offset = DeviceOffsets.ROUTE_ITEM_NAME_SPRITES_OFFSET + 0x900, size = 0x180),
                 "routeItem7Name" to
-                    SpritePatchRegion(offset = DeviceOffsets.ROUTE_ITEM_NAME_SPRITES_OFFSET + 0xA80, size = 0x140),
+                    SpritePatchRegion(offset = DeviceOffsets.ROUTE_ITEM_NAME_SPRITES_OFFSET + 0xA80, size = 0x180),
                 "routeItem8Name" to
-                    SpritePatchRegion(offset = DeviceOffsets.ROUTE_ITEM_NAME_SPRITES_OFFSET + 0xC00, size = 0x140),
+                    SpritePatchRegion(offset = DeviceOffsets.ROUTE_ITEM_NAME_SPRITES_OFFSET + 0xC00, size = 0x180),
                 "routeItem9Name" to
-                    SpritePatchRegion(offset = DeviceOffsets.ROUTE_ITEM_NAME_SPRITES_OFFSET + 0xD80, size = 0x140),
+                    SpritePatchRegion(offset = DeviceOffsets.ROUTE_ITEM_NAME_SPRITES_OFFSET + 0xD80, size = 0x180),
+            )
+
+        private val COURSE_NAMES =
+            listOf(
+                "Refreshing Field",
+                "Noisy Forest",
+                "Rugged Road",
+                "Beautiful Beach",
+                "Suburban Area",
+                "Dim Cave",
+                "Blue Lake",
+                "Town Outskirts",
+                "Hoenn Field",
+                "Warm Beach",
+                "Volcano Path",
+                "Treehouse",
+                "Scary Cave",
+                "Sinnoh Field",
+                "Icy Mountain Road",
+                "Big Forest",
+                "White Lake",
+                "Stormy Beach",
+                "Resort",
+                "Quiet Cave",
+                "Beyond The Sea",
+                "Night Sky's Edge",
+                "Yellow Forest",
+                "Rally",
+                "Sightseeing",
+                "Winners Path",
+                "Amity Meadow",
+            )
+
+        private val COURSE_UNLOCK_WATTS_THRESHOLDS =
+            intArrayOf(
+                0,
+                0,
+                50,
+                200,
+                500,
+                1_000,
+                2_000,
+                3_000,
+                5_000,
+                7_500,
+                10_000,
+                15_000,
+                20_000,
+                25_000,
+                30_000,
+                40_000,
+                50_000,
+                65_000,
+                80_000,
+                100_000,
             )
     }
 
@@ -111,37 +190,46 @@ class BridgeProtocolHandler(
     suspend fun handle(request: BridgeHttpRequest): BridgeHttpResponse {
         val method = request.method.uppercase()
         val path = request.path.substringBefore('?')
+        val requestLabel = "$method $path"
+        onBridgeEvent("Request: $requestLabel", false)
 
         return try {
-            when {
-                method == "GET" && (path == "/api/v1/status" || path == "/api/v1/bridge/status") -> handleStatus()
-                method == "GET" && (path == "/api/v1/snapshot" || path == "/api/v1/device/snapshot") -> handleSnapshot()
-                method == "GET" && path == "/api/v1/sync/package" -> handleSyncPackage()
-                method == "POST" &&
-                    (path == "/api/v1/commands/set-trainer" || path == "/api/v1/device/commands/set-trainer") ->
-                    handleSetTrainer(request)
-                method == "POST" &&
-                    (path == "/api/v1/commands/set-watts" || path == "/api/v1/device/commands/set-watts") ->
-                    handleSetWatts(request)
-                method == "POST" &&
-                    (path == "/api/v1/commands/set-steps" || path == "/api/v1/device/commands/set-steps") ->
-                    handleSetSteps(request)
-                method == "POST" &&
-                    (path == "/api/v1/commands/set-sync" || path == "/api/v1/device/commands/set-sync") ->
-                    handleSetSync(request)
-                method == "PATCH" &&
-                    (path == "/api/v1/patch/identity" || path == "/api/v1/device/identity") ->
-                    handlePatchIdentity(request)
-                method == "POST" && path == "/api/v1/stroll/send" -> handleStrollSend(request)
-                method == "POST" && path == "/api/v1/stroll/return" -> handleStrollReturn(request)
-                method == "POST" && path == "/api/v2/stroll/sprite-patches" -> handleSpritePatches(request)
-                method == "GET" && path == "/api/v1/eeprom/export" -> handleEepromExport()
-                method == "PUT" && path == "/api/v1/eeprom/import" -> handleEepromImport(request)
-                else -> errorResponse(404, "not_found", "Unknown endpoint: $method $path")
-            }
+            val response =
+                when {
+                    method == "GET" && (path == "/api/v1/status" || path == "/api/v1/bridge/status") -> handleStatus()
+                    method == "GET" && path == "/api/v1/device/identity" -> handleIdentity()
+                    method == "GET" && (path == "/api/v1/snapshot" || path == "/api/v1/device/snapshot") -> handleSnapshot()
+                    method == "GET" && path == "/api/v1/sync/package" -> handleSyncPackage()
+                    method == "POST" &&
+                        (path == "/api/v1/commands/set-trainer" || path == "/api/v1/device/commands/set-trainer") ->
+                        handleSetTrainer(request)
+                    method == "POST" &&
+                        (path == "/api/v1/commands/set-watts" || path == "/api/v1/device/commands/set-watts") ->
+                        handleSetWatts(request)
+                    method == "POST" &&
+                        (path == "/api/v1/commands/set-steps" || path == "/api/v1/device/commands/set-steps") ->
+                        handleSetSteps(request)
+                    method == "POST" &&
+                        (path == "/api/v1/commands/set-sync" || path == "/api/v1/device/commands/set-sync") ->
+                        handleSetSync(request)
+                    method == "PATCH" &&
+                        (path == "/api/v1/patch/identity" || path == "/api/v1/device/identity") ->
+                        handlePatchIdentity(request)
+                    method == "POST" && path == "/api/v1/stroll/send" -> handleStrollSend(request)
+                    method == "POST" && path == "/api/v1/stroll/return" -> handleStrollReturn(request)
+                    method == "POST" && path == "/api/v2/stroll/sprite-patches" -> handleSpritePatches(request)
+                    method == "GET" && path == "/api/v1/eeprom/export" -> handleEepromExport()
+                    method == "PUT" && path == "/api/v1/eeprom/import" -> handleEepromImport(request)
+                    else -> errorResponse(404, "not_found", "Unknown endpoint: $method $path")
+                }
+
+            onBridgeEvent("HTTP ${response.statusCode}: $requestLabel", false)
+            response
         } catch (error: BridgeProtocolException) {
+            onBridgeEvent("Error ${error.statusCode} ${error.code}: ${error.message} ($requestLabel)", true)
             errorResponse(error.statusCode, error.code, error.message)
         } catch (error: Exception) {
+            onBridgeEvent("Error 500 internal_error: ${error.message ?: "Internal server error"} ($requestLabel)", true)
             errorResponse(500, "internal_error", error.message ?: "Internal server error")
         }
     }
@@ -170,6 +258,32 @@ class BridgeProtocolHandler(
         return okJson(payload)
     }
 
+    private suspend fun handleIdentity(): BridgeHttpResponse {
+        val payload =
+            mutationMutex.withLock {
+                val engine = requireEngine()
+                val eeprom = engine.exportEeprom()
+
+                JSONObject()
+                    .put(
+                        "trainerName",
+                        DeviceBinary.readDeviceTextFixed(
+                            data = eeprom,
+                            offset = DeviceOffsets.IDENTITY_OWNER_NAME_OFFSET,
+                            maxChars = 8,
+                        ),
+                    )
+                    .put("trainerTid", DeviceBinary.readU16BE(eeprom, IDENTITY_TRAINER_TID_OFFSET))
+                    .put("trainerSid", DeviceBinary.readU16BE(eeprom, IDENTITY_TRAINER_SID_OFFSET))
+                    .put("protocolVersion", eeprom[DeviceOffsets.IDENTITY_PROTOCOL_VERSION_OFFSET].toInt() and 0xFF)
+                    .put("protocolSubVersion", eeprom[DeviceOffsets.IDENTITY_PROTOCOL_SUB_VERSION_OFFSET].toInt() and 0xFF)
+                    .put("lastSyncEpochSeconds", DeviceBinary.readU32BE(eeprom, DeviceOffsets.IDENTITY_LAST_SYNC_OFFSET))
+                    .put("stepCount", DeviceBinary.readU32BE(eeprom, DeviceOffsets.IDENTITY_STEP_COUNT_OFFSET))
+            }
+
+        return okJson(payload)
+    }
+
     private suspend fun handleSnapshot(): BridgeHttpResponse {
         val snapshot = mutationMutex.withLock {
             val engine = requireEngine()
@@ -183,13 +297,15 @@ class BridgeProtocolHandler(
             mutationMutex.withLock {
                 val engine = requireEngine()
                 val eeprom = engine.exportEeprom()
+                val courseUnlocks = buildCourseUnlocksDomain(eeprom)
 
                 JSONObject()
                     .put("status", "ok")
                     .put("schema", "wearwalker-sync-v1")
                     .put("generatedAtEpochSeconds", Instant.now().epochSecond)
                     .put("snapshot", snapshotJson(eeprom))
-                    .put("domains", buildSyncDomains(eeprom))
+                    .put("domains", buildSyncDomains(eeprom, courseUnlocks))
+                    .put("courseUnlocks", courseUnlocks)
             }
 
         return okJson(payload)
@@ -317,14 +433,12 @@ class BridgeProtocolHandler(
 
                 if (hasTid) {
                     val tid = body.requireInt("trainerTid", min = 0, max = 0xFFFF)
-                    DeviceBinary.writeU16BE(eeprom, DeviceOffsets.IDENTITY_OFFSET + 12, tid)
-                    DeviceBinary.writeU16LE(eeprom, TEAM_TRAINER_TID_OFFSET, tid)
+                    DeviceBinary.writeU16BE(eeprom, IDENTITY_TRAINER_TID_OFFSET, tid)
                 }
 
                 if (hasSid) {
                     val sid = body.requireInt("trainerSid", min = 0, max = 0xFFFF)
-                    DeviceBinary.writeU16BE(eeprom, DeviceOffsets.IDENTITY_OFFSET + 14, sid)
-                    DeviceBinary.writeU16LE(eeprom, TEAM_TRAINER_SID_OFFSET, sid)
+                    DeviceBinary.writeU16BE(eeprom, IDENTITY_TRAINER_SID_OFFSET, sid)
                 }
 
                 if (hasProtocolVersion) {
@@ -351,6 +465,8 @@ class BridgeProtocolHandler(
                     val stepCount = body.requireLong("stepCount", min = 0L, max = 0xFFFF_FFFFL)
                     writeStepCounters(eeprom, stepCount)
                 }
+
+                syncTeamIdentityFromIdentitySection(eeprom)
             }
 
         return okJson(snapshotEnvelope(snapshot))
@@ -360,15 +476,19 @@ class BridgeProtocolHandler(
         val body = parseJson(request)
         val resolvedRouteConfig = body.optJSONObject("resolvedRouteConfig")
         val usedResolvedRouteConfig = resolvedRouteConfig != null
+        var selectedCourseId = 0
+        var selectedRouteImageIndex = 0
 
         val snapshot =
             mutateEeprom("Stroll data imported via bridge") { eeprom ->
                 if (resolvedRouteConfig != null) {
-                    applyResolvedRouteConfig(eeprom, resolvedRouteConfig)
+                    selectedCourseId = applyResolvedRouteConfig(eeprom, resolvedRouteConfig)
                 } else {
                     val courseId = body.optInt("courseId", 0).coerceIn(0, 0xFF)
                     eeprom[ROUTE_IMAGE_INDEX_OFFSET] = courseId.toByte()
+                    selectedCourseId = courseId
                 }
+                selectedRouteImageIndex = eeprom[ROUTE_IMAGE_INDEX_OFFSET].toInt() and 0xFF
 
                 val walkingSource =
                     if (resolvedRouteConfig != null) {
@@ -387,11 +507,21 @@ class BridgeProtocolHandler(
                 DeviceBinary.writeWalkingCompanionFriendship(eeprom, friendship)
 
                 val nickname = body.optString("nickname", "").trim()
+                val displayName = if (nickname.isBlank()) "Companion" else nickname
                 writeDeviceTextFixed(
                     eeprom = eeprom,
                     offset = ROUTE_NICKNAME_OFFSET,
                     maxChars = ROUTE_NICKNAME_CHARS,
-                    text = nickname,
+                    text = displayName,
+                )
+
+                writeRouteNameForCourse(eeprom, selectedCourseId)
+                syncTeamIdentityFromIdentitySection(eeprom)
+                writeTeamWalkingCompanion(
+                    eeprom = eeprom,
+                    payload = walkingSource,
+                    friendship = friendship,
+                    nickname = displayName,
                 )
 
                 if (body.optBoolean("clearBuffers", false)) {
@@ -404,8 +534,18 @@ class BridgeProtocolHandler(
 
         val response =
             snapshotEnvelope(snapshot)
-                .put("resolvedRouteSource", if (usedResolvedRouteConfig) "wearos-local" else "legacy-course-id")
+                .put("resolvedRouteSource", if (usedResolvedRouteConfig) "3ds-local" else "legacy-course-id")
                 .put("applied", true)
+                .put("routeImageIndex", selectedRouteImageIndex)
+                .put("selectedRouteImageIndex", selectedRouteImageIndex)
+                .put("selectedCourseId", selectedCourseId)
+                .put("selectedCourseName", COURSE_NAMES.getOrNull(selectedCourseId) ?: "Course $selectedCourseId")
+
+        if (resolvedRouteConfig != null) {
+            response.put("configuredRouteSlots", buildConfiguredRouteSlots(resolvedRouteConfig))
+            response.put("configuredRouteItems", buildConfiguredRouteItems(resolvedRouteConfig))
+            response.put("resolvedRouteMeta", buildResolvedRouteMeta(resolvedRouteConfig))
+        }
 
         return okJson(response)
     }
@@ -413,6 +553,12 @@ class BridgeProtocolHandler(
     private suspend fun handleStrollReturn(request: BridgeHttpRequest): BridgeHttpResponse {
         val body = parseJson(request)
         val walkedSteps = body.requireLong("walkedSteps", min = 0L, max = 0xFFFF_FFFFL)
+        val gainedExpRequested =
+            if (body.has("gainedExp")) {
+                body.requireLong("gainedExp", min = 0L, max = 0xFFFF_FFFFL)
+            } else {
+                walkedSteps
+            }
         val bonusWatts = body.optLong("bonusWatts", 0L).coerceIn(0L, 0xFFFFL).toInt()
         val autoCaptures = body.optInt("autoCaptures", 0).coerceAtLeast(0)
         val replaceWhenFull = body.optBoolean("replaceWhenFull", false)
@@ -428,7 +574,8 @@ class BridgeProtocolHandler(
                 val engine = requireEngine()
                 val eeprom = engine.exportEeprom()
 
-                val walkingSpecies = DeviceBinary.readWalkingCompanionSpecies(eeprom)
+                val walkingSummary = readCompanionSummary(eeprom, ROUTE_WALKING_SUMMARY_OFFSET)
+                val walkingSpecies = walkingSummary.optInt("speciesId", 0)
                 if (walkingSpecies == 0) {
                     throw BridgeProtocolException(
                         statusCode = 400,
@@ -436,14 +583,24 @@ class BridgeProtocolHandler(
                         message = "No active walking companion to return",
                     )
                 }
+                val walkingLevel = walkingSummary.optInt("level", 1).coerceIn(1, 100)
+                val friendshipBefore = DeviceBinary.readWalkingCompanionFriendship(eeprom)
+                val friendshipAfter = (friendshipBefore.toLong() + walkedSteps).coerceIn(0L, 0xFFL).toInt()
 
                 val currentSteps = DeviceBinary.readU32BE(eeprom, DeviceOffsets.IDENTITY_STEP_COUNT_OFFSET)
-                val nextSteps = (currentSteps + walkedSteps).coerceAtMost(0xFFFF_FFFFL)
+                val transferredSteps = walkedSteps.coerceIn(0L, currentSteps)
+                val nextSteps = (currentSteps - transferredSteps).coerceAtLeast(0L)
+                val expGainApplied = gainedExpRequested.coerceIn(0L, transferredSteps)
                 writeStepCounters(eeprom, nextSteps)
 
                 val wattsFromSteps = (walkedSteps / 20L).coerceAtMost(0xFFFFL).toInt()
+                val requestedWattTransfer =
+                    (wattsFromSteps.toLong() + bonusWatts.toLong())
+                        .coerceIn(0L, Int.MAX_VALUE.toLong())
+                        .toInt()
                 val currentWatts = DeviceBinary.readCurrentWatts(eeprom)
-                val nextWatts = min(0xFFFF, currentWatts + wattsFromSteps + bonusWatts)
+                val transferredWatts = requestedWattTransfer.coerceAtMost(currentWatts)
+                val nextWatts = (currentWatts - transferredWatts).coerceAtLeast(0)
                 DeviceBinary.writeCurrentWatts(eeprom, nextWatts)
 
                 val allCaptures = mutableListOf<Int>()
@@ -456,15 +613,26 @@ class BridgeProtocolHandler(
                     }
                 }
 
-                var appliedCaptures = 0
-                var droppedCaptures = 0
+                val appliedCaptures = JSONArray()
+                val droppedCaptures = JSONArray()
                 allCaptures.forEachIndexed { index, speciesId ->
                     val routeSlot = DeviceBinary.findRouteSlotForSpecies(eeprom, speciesId) ?: (index % DeviceOffsets.COMPANION_SLOT_COUNT)
-                    val caught = captureCompanion(eeprom, routeSlot, replaceWhenFull, index)
-                    if (caught) {
-                        appliedCaptures += 1
+                    val placement = captureCompanion(eeprom, routeSlot, replaceWhenFull, index)
+                    if (placement != null) {
+                        appliedCaptures.put(
+                            JSONObject()
+                                .put("slot", placement.slot)
+                                .put("speciesId", placement.speciesId)
+                                .put("speciesName", speciesDisplayName(placement.speciesId))
+                                .put("level", placement.level),
+                        )
                     } else {
-                        droppedCaptures += 1
+                        droppedCaptures.put(
+                            JSONObject()
+                                .put("speciesId", speciesId.coerceIn(1, 0xFFFF))
+                                .put("speciesName", speciesDisplayName(speciesId))
+                                .put("reason", "no-empty-slot"),
+                        )
                     }
                 }
 
@@ -478,21 +646,73 @@ class BridgeProtocolHandler(
                 writeLastSyncAcrossBlocks(eeprom, Instant.now().epochSecond)
                 syncGeneralMirror(eeprom)
 
+                val snapshot = snapshotJson(eeprom)
+                val inventory = buildInventoryDomain(eeprom)
+                val courseUnlocks = buildCourseUnlocksDomain(eeprom)
+
                 engine.replaceEeprom(eeprom)
                 eepromStorage.save(eeprom)
-                onStateRefreshed("Stroll return processed via bridge")
+                onStateRefreshed("Stroll return processed via bridge (transferred steps: $transferredSteps, watts: $transferredWatts)")
 
                 JSONObject()
                     .put("status", "ok")
-                    .put("capturesApplied", appliedCaptures)
-                    .put("capturesDropped", droppedCaptures)
-                    .put("snapshot", snapshotJson(eeprom))
+                    .put("snapshot", snapshot)
+                    .put("inventory", inventory)
+                    .put("courseUnlocks", courseUnlocks)
+                    .put("routes", buildRoutesDomain(eeprom, courseUnlocks))
+                    .put(
+                        "returnedPokemon",
+                        JSONObject()
+                            .put("speciesId", walkingSpecies)
+                            .put("speciesName", speciesDisplayName(walkingSpecies))
+                            .put("startLevel", walkingLevel)
+                            .put("endLevel", walkingLevel)
+                            .put("expGainRequested", gainedExpRequested)
+                                .put("expGainApplied", expGainApplied)
+                                .put("expGain", expGainApplied)
+                            .put("friendshipBefore", friendshipBefore)
+                            .put("friendshipAfter", friendshipAfter),
+                    )
+                    .put(
+                        "steps",
+                        JSONObject()
+                            .put("inputWalkedSteps", walkedSteps)
+                            .put("transferred", transferredSteps)
+                            .put("current", snapshot.optInt("steps")),
+                    )
+                    .put(
+                        "watts",
+                        JSONObject()
+                            .put("fromSteps", wattsFromSteps)
+                            .put("bonus", bonusWatts)
+                            .put("totalTransferred", transferredWatts)
+                            .put("current", snapshot.optInt("watts")),
+                    )
+                    .put(
+                        "captures",
+                        JSONObject()
+                            .put("requested", allCaptures.size)
+                            .put("applied", appliedCaptures)
+                            .put("dropped", droppedCaptures)
+                            .put("clearCaughtAfterReturn", clearCaughtAfterReturn),
+                    )
             }
 
         val snapshot = resultPayload.getJSONObject("snapshot")
         val response = snapshotEnvelope(snapshot)
-        response.put("capturesApplied", resultPayload.getInt("capturesApplied"))
-        response.put("capturesDropped", resultPayload.getInt("capturesDropped"))
+
+        val keys = resultPayload.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            if (key == "status" || key == "snapshot") {
+                continue
+            }
+            response.put(key, resultPayload.opt(key))
+        }
+
+        val capturesPayload = response.optJSONObject("captures")
+        response.put("capturesApplied", capturesPayload?.optJSONArray("applied")?.length() ?: 0)
+        response.put("capturesDropped", capturesPayload?.optJSONArray("dropped")?.length() ?: 0)
         return okJson(response)
     }
 
@@ -727,7 +947,21 @@ class BridgeProtocolHandler(
             .put("lastSyncEpochSeconds", DeviceBinary.readLastSyncSeconds(eeprom))
     }
 
-    private fun buildSyncDomains(eeprom: ByteArray): JSONObject {
+    private fun buildSyncDomains(
+        eeprom: ByteArray,
+        courseUnlocks: JSONObject,
+    ): JSONObject {
+        val snapshot = snapshotJson(eeprom)
+        val routeImageIndex = eeprom[ROUTE_IMAGE_INDEX_OFFSET].toInt() and 0xFF
+        val routeName =
+            DeviceBinary.readDeviceTextFixed(
+                data = eeprom,
+                offset = ROUTE_NAME_OFFSET,
+                maxChars = ROUTE_NAME_CHARS,
+            ).trim()
+        val routeCourseId = resolveRouteCourseId(routeImageIndex, routeName)
+        val routeCourseName = routeCourseId?.let { COURSE_NAMES.getOrNull(it) }
+
         val identityDomain =
             JSONObject()
                 .put(
@@ -745,7 +979,7 @@ class BridgeProtocolHandler(
 
         val statsDomain =
             JSONObject()
-                .put("steps", snapshotJson(eeprom).optInt("steps"))
+                .put("steps", snapshot.optInt("steps"))
                 .put("watts", DeviceBinary.readCurrentWatts(eeprom))
                 .put("todaySteps", DeviceBinary.readU32BE(eeprom, DeviceOffsets.HEALTH_TODAY_STEPS_OFFSET))
                 .put("lifetimeSteps", DeviceBinary.readU32BE(eeprom, DeviceOffsets.HEALTH_LIFETIME_STEPS_OFFSET))
@@ -755,48 +989,210 @@ class BridgeProtocolHandler(
             JSONObject()
                 .put("walkingSpecies", DeviceBinary.readWalkingCompanionSpecies(eeprom))
                 .put("friendship", DeviceBinary.readWalkingCompanionFriendship(eeprom))
+                .put(
+                    "walkingNickname",
+                    DeviceBinary.readDeviceTextFixed(
+                        data = eeprom,
+                        offset = ROUTE_NICKNAME_OFFSET,
+                        maxChars = ROUTE_NICKNAME_CHARS,
+                    ),
+                )
                 .put("routeImageIndex", eeprom[ROUTE_IMAGE_INDEX_OFFSET].toInt() and 0xFF)
-
-        val caught = JSONArray()
-        for (slot in 0 until DeviceOffsets.COMPANION_SLOT_COUNT) {
-            val base = DeviceOffsets.CAUGHT_COMPANION_OFFSET + slot * DeviceOffsets.COMPANION_SUMMARY_SIZE
-            caught.put(
-                JSONObject()
-                    .put("slot", slot)
-                    .put("speciesId", DeviceBinary.readCaughtCompanionSpecies(eeprom, slot))
-                    .put("level", eeprom[base + 12].toInt() and 0xFF),
-            )
-        }
-
-        val dowsed = JSONArray()
-        for (index in 0 until DeviceOffsets.DOWSED_ITEM_COUNT) {
-            dowsed.put(
-                JSONObject()
-                    .put("slot", index)
-                    .put("itemId", DeviceBinary.readDowsedItemId(eeprom, index)),
-            )
-        }
-
-        val gifted = JSONArray()
-        for (index in 0 until DeviceOffsets.GIFTED_ITEM_COUNT) {
-            gifted.put(
-                JSONObject()
-                    .put("slot", index)
-                    .put("itemId", DeviceBinary.readGiftedItemId(eeprom, index)),
-            )
-        }
-
-        val inventoryDomain =
-            JSONObject()
-                .put("caught", caught)
-                .put("dowsedItems", dowsed)
-                .put("giftedItems", gifted)
+                .put("routeCourseId", routeCourseId ?: JSONObject.NULL)
+                .put("routeCourseName", routeCourseName ?: JSONObject.NULL)
+                .put("routeName", routeName)
+                .put("routeItems", buildRouteItemsArray(eeprom))
 
         return JSONObject()
             .put("identity", identityDomain)
             .put("stats", statsDomain)
             .put("stroll", strollDomain)
-            .put("inventory", inventoryDomain)
+            .put("inventory", buildInventoryDomain(eeprom))
+            .put("routes", buildRoutesDomain(eeprom, courseUnlocks))
+            .put("courseUnlocks", courseUnlocks)
+    }
+
+    private fun buildInventoryDomain(eeprom: ByteArray): JSONObject {
+        val caught = JSONArray()
+        for (slot in 0 until DeviceOffsets.COMPANION_SLOT_COUNT) {
+            val base = DeviceOffsets.CAUGHT_COMPANION_OFFSET + slot * DeviceOffsets.COMPANION_SUMMARY_SIZE
+            val summary = readCompanionSummary(eeprom, base)
+            summary.put("slot", slot)
+            caught.put(summary)
+        }
+
+        val dowsed = JSONArray()
+        for (index in 0 until DeviceOffsets.DOWSED_ITEM_COUNT) {
+            val itemId = DeviceBinary.readDowsedItemId(eeprom, index)
+            val payload = JSONObject().put("slot", index).put("itemId", itemId)
+            if (itemId > 0) {
+                payload.put("itemName", itemDisplayName(itemId))
+            }
+            dowsed.put(payload)
+        }
+
+        val gifted = JSONArray()
+        for (index in 0 until DeviceOffsets.GIFTED_ITEM_COUNT) {
+            val itemId = DeviceBinary.readGiftedItemId(eeprom, index)
+            val payload = JSONObject().put("slot", index).put("itemId", itemId)
+            if (itemId > 0) {
+                payload.put("itemName", itemDisplayName(itemId))
+            }
+            gifted.put(payload)
+        }
+
+        return JSONObject()
+            .put("caught", caught)
+            .put("dowsedItems", dowsed)
+            .put("giftedItems", gifted)
+    }
+
+    private fun buildRoutesDomain(
+        eeprom: ByteArray,
+        courseUnlocks: JSONObject,
+    ): JSONObject {
+        val routeImageIndex = eeprom[ROUTE_IMAGE_INDEX_OFFSET].toInt() and 0xFF
+        val routeName =
+            DeviceBinary.readDeviceTextFixed(
+                data = eeprom,
+                offset = ROUTE_NAME_OFFSET,
+                maxChars = ROUTE_NAME_CHARS,
+            ).trim()
+        val routeCourseId = resolveRouteCourseId(routeImageIndex, routeName)
+        val routeCourseName = routeCourseId?.let { COURSE_NAMES.getOrNull(it) }
+
+        return JSONObject()
+            .put("walkingSpecies", DeviceBinary.readWalkingCompanionSpecies(eeprom))
+            .put("routeImageIndex", routeImageIndex)
+            .put("routeCourseId", routeCourseId ?: JSONObject.NULL)
+            .put("routeCourseName", routeCourseName ?: JSONObject.NULL)
+            .put("routeName", routeName)
+            .put("routeSlots", buildRouteSlotsArray(eeprom))
+            .put("routeItems", buildRouteItemsArray(eeprom))
+            .put("courseUnlocks", courseUnlocks)
+    }
+
+    private fun buildRouteSlotsArray(eeprom: ByteArray): JSONArray {
+        val payload = JSONArray()
+        for (slot in 0 until DeviceOffsets.COMPANION_SLOT_COUNT) {
+            val base = DeviceOffsets.ROUTE_COMPANION_LIST_OFFSET + slot * DeviceOffsets.COMPANION_SUMMARY_SIZE
+            val summary = readCompanionSummary(eeprom, base)
+            summary
+                .put("slot", slot)
+                .put("minSteps", DeviceBinary.readRouteCompanionMinSteps(eeprom, slot))
+                .put("chance", DeviceBinary.readRouteCompanionChance(eeprom, slot))
+            payload.put(summary)
+        }
+        return payload
+    }
+
+    private fun buildRouteItemsArray(eeprom: ByteArray): JSONArray {
+        val payload = JSONArray()
+        for (index in 0 until DeviceOffsets.ROUTE_ITEM_COUNT) {
+            val itemId = DeviceBinary.readRouteItemId(eeprom, index)
+            val entry =
+                JSONObject()
+                    .put("routeItemIndex", index)
+                    .put("itemId", itemId)
+                    .put("minSteps", DeviceBinary.readRouteItemMinSteps(eeprom, index))
+                    .put("chance", DeviceBinary.readRouteItemChance(eeprom, index))
+            if (itemId > 0) {
+                entry.put("itemName", itemDisplayName(itemId))
+            }
+            payload.put(entry)
+        }
+        return payload
+    }
+
+    private fun readCompanionSummary(
+        eeprom: ByteArray,
+        offset: Int,
+    ): JSONObject {
+        val moves = JSONArray()
+        for (index in 0 until 4) {
+            moves.put(DeviceBinary.readU16LE(eeprom, offset + 4 + index * 2))
+        }
+
+        return JSONObject()
+            .put("speciesId", DeviceBinary.readU16LE(eeprom, offset))
+            .put("heldItem", DeviceBinary.readU16LE(eeprom, offset + 2))
+            .put("moves", moves)
+            .put("level", eeprom[offset + 12].toInt() and 0xFF)
+            .put("variantFlags", eeprom[offset + 10].toInt() and 0xFF)
+            .put("specialFlags", eeprom[offset + 11].toInt() and 0xFF)
+    }
+
+    private fun buildCourseUnlocksDomain(eeprom: ByteArray): JSONObject {
+        val watts = DeviceBinary.readCurrentWatts(eeprom)
+        val unlockFlags = computeCourseUnlockFlags(watts)
+
+        val unlockedCourses = JSONArray()
+        val unlockedCourseNames = JSONArray()
+        for (index in COURSE_NAMES.indices) {
+            if ((unlockFlags and (1 shl index)) != 0) {
+                unlockedCourses.put(index)
+                unlockedCourseNames.put(COURSE_NAMES[index])
+            }
+        }
+
+        var nextUnlock: JSONObject? = null
+        for (index in COURSE_UNLOCK_WATTS_THRESHOLDS.indices) {
+            val threshold = COURSE_UNLOCK_WATTS_THRESHOLDS[index]
+            if (threshold > watts) {
+                nextUnlock =
+                    JSONObject()
+                        .put("courseId", index)
+                        .put("courseName", COURSE_NAMES.getOrNull(index) ?: "Course $index")
+                        .put("requiredWatts", threshold)
+                        .put("remainingWatts", threshold - watts)
+                break
+            }
+        }
+
+        return JSONObject()
+            .put("watts", watts)
+            .put("unlockFlags", unlockFlags)
+            .put("unlockFlagsHex", String.format("0x%08X", unlockFlags))
+            .put("unlockedCourses", unlockedCourses)
+            .put("unlockedCourseNames", unlockedCourseNames)
+            .put("nextWattsUnlock", nextUnlock ?: JSONObject.NULL)
+    }
+
+    private fun computeCourseUnlockFlags(watts: Int): Int {
+        var flags = 0
+        for (index in COURSE_UNLOCK_WATTS_THRESHOLDS.indices) {
+            if (watts >= COURSE_UNLOCK_WATTS_THRESHOLDS[index]) {
+                flags = flags or (1 shl index)
+            }
+        }
+        return flags
+    }
+
+    private fun resolveRouteCourseId(
+        routeImageIndex: Int,
+        routeName: String,
+    ): Int? {
+        if (routeName.isNotEmpty()) {
+            val byName = COURSE_NAMES.indexOfFirst { it.equals(routeName, ignoreCase = false) }
+            if (byName >= 0) {
+                return byName
+            }
+        }
+        return if (routeImageIndex in COURSE_NAMES.indices) routeImageIndex else null
+    }
+
+    private fun speciesDisplayName(speciesId: Int): String {
+        if (speciesId <= 0) {
+            return "NONE"
+        }
+        return "MON$speciesId"
+    }
+
+    private fun itemDisplayName(itemId: Int): String {
+        if (itemId <= 0) {
+            return "NONE"
+        }
+        return "ITEM $itemId"
     }
 
     private fun writeStepCounters(
@@ -832,9 +1228,11 @@ class BridgeProtocolHandler(
     private fun applyResolvedRouteConfig(
         eeprom: ByteArray,
         config: JSONObject,
-    ) {
+    ): Int {
         val routeImageIndex = config.optInt("routeImageIndex", config.optInt("courseId", 0)).coerceIn(0, 0xFF)
+        val courseId = config.optInt("courseId", routeImageIndex)
         eeprom[ROUTE_IMAGE_INDEX_OFFSET] = routeImageIndex.toByte()
+        writeRouteNameForCourse(eeprom, courseId)
 
         val slots = config.optJSONArray("slots")
             ?: throw BridgeProtocolException(
@@ -913,6 +1311,193 @@ class BridgeProtocolHandler(
             DeviceBinary.writeU16LE(eeprom, ROUTE_ITEM_MIN_STEPS_OFFSET + routeItemIndex * 2, minSteps)
             eeprom[ROUTE_ITEM_CHANCE_OFFSET + routeItemIndex] = chance.toByte()
         }
+
+        return courseId
+    }
+
+    private fun writeRouteNameForCourse(
+        eeprom: ByteArray,
+        courseId: Int,
+    ) {
+        val normalizedCourseId = courseId.coerceAtLeast(0)
+        val courseName = COURSE_NAMES.getOrNull(normalizedCourseId) ?: "Course $normalizedCourseId"
+        writeDeviceTextFixed(
+            eeprom = eeprom,
+            offset = ROUTE_NAME_OFFSET,
+            maxChars = ROUTE_NAME_CHARS,
+            text = courseName,
+        )
+    }
+
+    private fun buildConfiguredRouteSlots(config: JSONObject): JSONArray {
+        val payload = JSONArray()
+        val bySlot = HashMap<Int, JSONObject>()
+        val rawSlots = config.optJSONArray("slots") ?: JSONArray()
+
+        for (index in 0 until rawSlots.length()) {
+            val entry = rawSlots.optJSONObject(index) ?: continue
+            val slot = entry.optInt("slot", -1)
+            if (slot !in 0 until DeviceOffsets.COMPANION_SLOT_COUNT) {
+                continue
+            }
+
+            val payload =
+                JSONObject()
+                    .put("slot", slot)
+                    .put("sourcePairIndex", entry.optInt("sourcePairIndex", -1))
+                    .put("speciesId", entry.optInt("speciesId", 0).coerceIn(0, 0xFFFF))
+                    .put("level", entry.optInt("level", 1).coerceIn(1, 100))
+                    .put("chance", entry.optInt("chance", 0).coerceIn(0, 0xFF))
+                    .put("minSteps", entry.optInt("minSteps", 0).coerceIn(0, 0xFFFF))
+            if (entry.has("speciesName")) {
+                payload.put("speciesName", entry.optString("speciesName", "").trim())
+            }
+            bySlot[slot] = payload
+        }
+
+        for (slot in 0 until DeviceOffsets.COMPANION_SLOT_COUNT) {
+            payload.put(
+                bySlot[slot]
+                    ?: JSONObject()
+                        .put("slot", slot)
+                        .put("speciesId", 0)
+                        .put("level", 1)
+                        .put("chance", 0)
+                        .put("minSteps", 0),
+            )
+        }
+
+        return payload
+    }
+
+    private fun buildConfiguredRouteItems(config: JSONObject): JSONArray {
+        val payload = JSONArray()
+        val byIndex = HashMap<Int, JSONObject>()
+        val rawItems = config.optJSONArray("items") ?: JSONArray()
+
+        for (index in 0 until rawItems.length()) {
+            val entry = rawItems.optJSONObject(index) ?: continue
+            val routeItemIndex = entry.optInt("routeItemIndex", -1)
+            if (routeItemIndex !in 0 until DeviceOffsets.ROUTE_ITEM_COUNT) {
+                continue
+            }
+
+            val payload =
+                JSONObject()
+                    .put("routeItemIndex", routeItemIndex)
+                    .put("itemId", entry.optInt("itemId", 0).coerceIn(0, 0xFFFF))
+                    .put("minSteps", entry.optInt("minSteps", 0).coerceIn(0, 0xFFFF))
+                    .put("chance", entry.optInt("chance", 0).coerceIn(0, 0xFF))
+            if (entry.has("itemName")) {
+                payload.put("itemName", entry.optString("itemName", "").trim())
+            }
+            byIndex[routeItemIndex] = payload
+        }
+
+        for (routeItemIndex in 0 until DeviceOffsets.ROUTE_ITEM_COUNT) {
+            payload.put(
+                byIndex[routeItemIndex]
+                    ?: JSONObject()
+                        .put("routeItemIndex", routeItemIndex)
+                        .put("itemId", 0)
+                        .put("minSteps", 0)
+                        .put("chance", 0),
+            )
+        }
+
+        return payload
+    }
+
+    private fun buildResolvedRouteMeta(config: JSONObject): JSONObject {
+        val rawAdvantagedTypes = config.optJSONArray("advantagedTypes") ?: JSONArray()
+        val advantagedTypes = JSONArray()
+        for (index in 0 until rawAdvantagedTypes.length()) {
+            advantagedTypes.put(rawAdvantagedTypes.optInt(index, 0).coerceIn(0, 0xFF))
+        }
+
+        return JSONObject()
+            .put("schemaVersion", config.optInt("schemaVersion", 1).coerceAtLeast(1))
+            .put("romSize", config.optLong("romSize", 0L).coerceAtLeast(0L))
+            .put("romMtime", config.optLong("romMtime", 0L).coerceAtLeast(0L))
+            .put("advantagedTypes", advantagedTypes)
+    }
+
+    private fun syncTeamIdentityFromIdentitySection(eeprom: ByteArray) {
+        val identityTid = DeviceBinary.readU16BE(eeprom, IDENTITY_TRAINER_TID_OFFSET)
+        val identitySid = DeviceBinary.readU16BE(eeprom, IDENTITY_TRAINER_SID_OFFSET)
+
+        if (identityTid != 0) {
+            DeviceBinary.writeU16LE(eeprom, TEAM_TRAINER_TID_OFFSET, identityTid)
+        }
+        if (identitySid != 0) {
+            DeviceBinary.writeU16LE(eeprom, TEAM_TRAINER_SID_OFFSET, identitySid)
+        }
+
+        val trainerName =
+            DeviceBinary.readDeviceTextFixed(
+                data = eeprom,
+                offset = DeviceOffsets.IDENTITY_OWNER_NAME_OFFSET,
+                maxChars = 8,
+            ).trim()
+        if (trainerName.isNotEmpty()) {
+            writeDeviceTextFixed(
+                eeprom = eeprom,
+                offset = TEAM_TRAINER_NAME_OFFSET,
+                maxChars = TEAM_TRAINER_NAME_CHARS,
+                text = trainerName,
+            )
+        }
+
+        val identityUniq =
+            eeprom.copyOfRange(
+                IDENTITY_UNIQ_OFFSET,
+                IDENTITY_UNIQ_OFFSET + IDENTITY_UNIQ_SIZE,
+            )
+        if (identityUniq.any { byte -> byte.toInt() != 0 }) {
+            System.arraycopy(identityUniq, 0, eeprom, TEAM_UNIQ_OFFSET, TEAM_UNIQ_SIZE)
+        }
+    }
+
+    private fun writeTeamWalkingCompanion(
+        eeprom: ByteArray,
+        payload: JSONObject,
+        friendship: Int,
+        nickname: String,
+    ) {
+        val speciesId = payload.optInt("speciesId", 0).coerceIn(0, 0xFFFF)
+        val heldItem = payload.optInt("heldItemId", payload.optInt("heldItem", 0)).coerceIn(0, 0xFFFF)
+        val level = payload.optInt("level", 1).coerceIn(1, 100)
+
+        DeviceBinary.writeU16LE(eeprom, TEAM_COMPANION_OFFSET + TEAM_COMPANION_SPECIES_OFFSET, speciesId)
+        DeviceBinary.writeU16LE(eeprom, TEAM_COMPANION_OFFSET + TEAM_COMPANION_HELD_ITEM_OFFSET, heldItem)
+
+        val moves = payload.optJSONArray("moves")
+        for (index in 0 until 4) {
+            val move = moves?.optInt(index, 0)?.coerceIn(0, 0xFFFF) ?: 0
+            DeviceBinary.writeU16LE(eeprom, TEAM_COMPANION_OFFSET + TEAM_COMPANION_MOVES_OFFSET + index * 2, move)
+        }
+
+        val teamTid = DeviceBinary.readU16LE(eeprom, TEAM_TRAINER_TID_OFFSET)
+        val teamSid = DeviceBinary.readU16LE(eeprom, TEAM_TRAINER_SID_OFFSET)
+        DeviceBinary.writeU16LE(eeprom, TEAM_COMPANION_OFFSET + TEAM_COMPANION_OT_TID_OFFSET, teamTid)
+        DeviceBinary.writeU16LE(eeprom, TEAM_COMPANION_OFFSET + TEAM_COMPANION_OT_SID_OFFSET, teamSid)
+
+        val variantFlags =
+            when {
+                payload.has("variantFlags") -> payload.optInt("variantFlags", 0).coerceIn(0, 0xFF)
+                payload.optInt("gender", 0) == 1 -> 0x20
+                else -> 0
+            }
+        eeprom[TEAM_COMPANION_OFFSET + TEAM_COMPANION_VARIANT_OFFSET] = variantFlags.toByte()
+        eeprom[TEAM_COMPANION_OFFSET + TEAM_COMPANION_HAPPINESS_OFFSET] = friendship.coerceIn(0, 0xFF).toByte()
+        eeprom[TEAM_COMPANION_OFFSET + TEAM_COMPANION_LEVEL_OFFSET] = level.toByte()
+
+        writeDeviceTextFixed(
+            eeprom = eeprom,
+            offset = TEAM_COMPANION_OFFSET + TEAM_COMPANION_NICKNAME_OFFSET,
+            maxChars = TEAM_COMPANION_NICKNAME_CHARS,
+            text = nickname,
+        )
     }
 
     private fun buildWalkingSummarySource(
@@ -1118,16 +1703,16 @@ class BridgeProtocolHandler(
         routeSlot: Int,
         replaceWhenFull: Boolean,
         captureIndex: Int,
-    ): Boolean {
+    ): CapturePlacement? {
         if (routeSlot !in 0 until DeviceOffsets.COMPANION_SLOT_COUNT) {
-            return false
+            return null
         }
 
         val sourceOffset =
             DeviceOffsets.ROUTE_COMPANION_LIST_OFFSET + routeSlot * DeviceOffsets.COMPANION_SUMMARY_SIZE
         val species = DeviceBinary.readU16LE(eeprom, sourceOffset)
         if (species == 0) {
-            return false
+            return null
         }
 
         for (slot in 0 until DeviceOffsets.COMPANION_SLOT_COUNT) {
@@ -1135,18 +1720,28 @@ class BridgeProtocolHandler(
             val currentSpecies = DeviceBinary.readU16LE(eeprom, targetOffset)
             if (currentSpecies == 0) {
                 System.arraycopy(eeprom, sourceOffset, eeprom, targetOffset, DeviceOffsets.COMPANION_SUMMARY_SIZE)
-                return true
+                val level = eeprom[targetOffset + 12].toInt() and 0xFF
+                return CapturePlacement(
+                    slot = slot,
+                    speciesId = species,
+                    level = level.coerceIn(1, 100),
+                )
             }
         }
 
         if (!replaceWhenFull) {
-            return false
+            return null
         }
 
         val replaceSlot = captureIndex % DeviceOffsets.COMPANION_SLOT_COUNT
         val targetOffset = DeviceOffsets.CAUGHT_COMPANION_OFFSET + replaceSlot * DeviceOffsets.COMPANION_SUMMARY_SIZE
         System.arraycopy(eeprom, sourceOffset, eeprom, targetOffset, DeviceOffsets.COMPANION_SUMMARY_SIZE)
-        return true
+        val level = eeprom[targetOffset + 12].toInt() and 0xFF
+        return CapturePlacement(
+            slot = replaceSlot,
+            speciesId = species,
+            level = level.coerceIn(1, 100),
+        )
     }
 
     private fun toSpeciesList(array: JSONArray): List<Int> {
@@ -1215,6 +1810,7 @@ class BridgeProtocolHandler(
             char == '=' -> 0x00F4
             char == '.' -> 0x00F8
             char == ',' -> 0x00F9
+            char.code in 0x20..0x7E -> char.code
             else -> 0x00E2
         }
     }

@@ -39,7 +39,8 @@ class BridgeHttpServer(
 ) {
     companion object {
         private const val ACCEPT_TIMEOUT_MS = 1000
-        private const val MAX_BODY_SIZE = 131072
+        private const val CLIENT_SOCKET_TIMEOUT_MS = 30000
+        private const val MAX_BODY_SIZE = 1048576
         private const val MAX_LINE_LENGTH = 8192
     }
 
@@ -103,7 +104,7 @@ class BridgeHttpServer(
     private suspend fun handleClient(client: Socket) {
         client.use { socket ->
             runCatching {
-                socket.soTimeout = 5000
+                socket.soTimeout = CLIENT_SOCKET_TIMEOUT_MS
                 val request = readRequest(socket) ?: return
                 val response =
                     try {
